@@ -191,6 +191,13 @@ impl CsvrApp {
         self.filtered_indices = filter_rows(&self.rows, &self.search_query);
         self.scroll_handle.scroll_to_item(0, gpui::ScrollStrategy::Top);
     }
+
+    fn toggle_search(&mut self) {
+        self.search_active = !self.search_active;
+        if !self.search_active {
+            self.set_search_query(String::new());
+        }
+    }
 }
 
 impl Render for CsvrApp {
@@ -204,10 +211,7 @@ impl Render for CsvrApp {
             .track_focus(&self.focus_handle(cx))
             .key_context("CsvrApp")
             .on_action(cx.listener(|this, _: &ToggleSearch, _window, cx| {
-                this.search_active = !this.search_active;
-                if !this.search_active {
-                    this.set_search_query(String::new());
-                }
+                this.toggle_search();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &DismissSearch, _window, cx| {
@@ -220,12 +224,9 @@ impl Render for CsvrApp {
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let keystroke = &event.keystroke;
 
-                // `/` toggles search
-                if keystroke.key_char.as_deref() == Some("/") {
-                    this.search_active = !this.search_active;
-                    if !this.search_active {
-                        this.set_search_query(String::new());
-                    }
+                // `/` opens search only when inactive
+                if !this.search_active && keystroke.key_char.as_deref() == Some("/") {
+                    this.search_active = true;
                     cx.notify();
                     return;
                 }

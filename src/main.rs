@@ -619,8 +619,8 @@ fn main() {
     let data = load_csv();
     Application::new().run(|cx: &mut App| {
         cx.bind_keys([
-            KeyBinding::new("cmd-f", ToggleSearch, None),
-            KeyBinding::new("escape", DismissSearch, None),
+            KeyBinding::new("cmd-f", ToggleSearch, Some("CsvrApp")),
+            KeyBinding::new("escape", DismissSearch, Some("CsvrApp")),
         ]);
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(

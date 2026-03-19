@@ -193,10 +193,16 @@ impl CsvrApp {
     }
 
     fn toggle_search(&mut self) {
-        self.search_active = !self.search_active;
-        if !self.search_active {
-            self.set_search_query(String::new());
+        if self.search_active {
+            self.close_search();
+        } else {
+            self.search_active = true;
         }
+    }
+
+    fn close_search(&mut self) {
+        self.search_active = false;
+        self.set_search_query(String::new());
     }
 }
 
@@ -216,8 +222,7 @@ impl Render for CsvrApp {
             }))
             .on_action(cx.listener(|this, _: &DismissSearch, _window, cx| {
                 if this.search_active {
-                    this.search_active = false;
-                    this.set_search_query(String::new());
+                    this.close_search();
                     cx.notify();
                 }
             }))
@@ -349,15 +354,15 @@ impl Render for CsvrApp {
                         move |this, range, _, _| {
                             this.visible_range = range.clone();
                             range
-                                .map(|i| {
-                                    let original_idx = this.filtered_indices[i];
-                                    TableRow {
+                                .filter_map(|i| {
+                                    let original_idx = *this.filtered_indices.get(i)?;
+                                    Some(TableRow {
                                         ix: i,
                                         row_num: original_idx + 1,
-                                        cells: this.rows[original_idx].clone(),
+                                        cells: this.rows.get(original_idx)?.clone(),
                                         col_widths: this.col_widths.clone(),
                                         row_num_width: this.row_num_width,
-                                    }
+                                    })
                                 })
                                 .collect()
                         }

@@ -82,30 +82,40 @@ fn sort_indices(
     col: usize,
     direction: SortDirection,
 ) -> Vec<usize> {
-    // Decide comparison mode for the entire column to guarantee total order.
-    // If every non-empty value in the column parses as f64, use numeric comparison.
+    // Decide comparison mode based on the given indices to guarantee total order.
+    // When combined with filtering, this means filtered-in rows determine the mode.
     let use_numeric = indices.iter().all(|&i| {
         let val = rows[i].get(col).map(|s| s.as_str()).unwrap_or("");
         val.is_empty() || val.parse::<f64>().is_ok()
     });
 
-    let mut sorted = indices.to_vec();
-    sorted.sort_by(|&a, &b| {
-        let val_a = rows[a].get(col).map(|s| s.as_str()).unwrap_or("");
-        let val_b = rows[b].get(col).map(|s| s.as_str()).unwrap_or("");
-        let cmp = if use_numeric {
-            let na = val_a.parse::<f64>().unwrap_or(f64::NEG_INFINITY);
-            let nb = val_b.parse::<f64>().unwrap_or(f64::NEG_INFINITY);
-            na.total_cmp(&nb)
-        } else {
-            val_a.cmp(val_b)
-        };
-        match direction {
-            SortDirection::Ascending => cmp,
-            SortDirection::Descending => cmp.reverse(),
-        }
-    });
-    sorted
+    if use_numeric {
+        // Pre-compute sort keys to avoid O(n log n) parses inside sort_by.
+        let mut keyed: Vec<(usize, f64)> = indices
+            .iter()
+            .map(|&i| {
+                let val = rows[i].get(col).map(|s| s.as_str()).unwrap_or("");
+                let n = val.parse::<f64>().unwrap_or(f64::NEG_INFINITY);
+                (i, n)
+            })
+            .collect();
+        keyed.sort_by(|(_, a), (_, b)| match direction {
+            SortDirection::Ascending => a.total_cmp(b),
+            SortDirection::Descending => b.total_cmp(a),
+        });
+        keyed.into_iter().map(|(i, _)| i).collect()
+    } else {
+        let mut sorted = indices.to_vec();
+        sorted.sort_by(|&a, &b| {
+            let val_a = rows[a].get(col).map(|s| s.as_str()).unwrap_or("");
+            let val_b = rows[b].get(col).map(|s| s.as_str()).unwrap_or("");
+            match direction {
+                SortDirection::Ascending => val_a.cmp(val_b),
+                SortDirection::Descending => val_b.cmp(val_a),
+            }
+        });
+        sorted
+    }
 }
 
 // Catppuccin Mocha palette
@@ -250,6 +260,8 @@ impl CsvrApp {
             _ => Some((col, SortDirection::Ascending)),
         };
         self.recompute_filtered_indices();
+        self.scroll_handle
+            .scroll_to_item(0, gpui::ScrollStrategy::Top);
     }
 
     fn toggle_search(&mut self) {
@@ -356,27 +368,29 @@ impl Render for CsvrApp {
                                     .zip(self.col_widths.iter())
                                     .enumerate()
                                     .map(|(col_idx, (label, &width))| {
-                                        let indicator = match self.sort_state {
-                                            Some((c, SortDirection::Ascending)) if c == col_idx => {
-                                                " ▲"
+                                        let indicator: SharedString = match self.sort_state {
+                                            Some((c, SortDirection::Ascending))
+                                                if c == col_idx =>
+                                            {
+                                                "▲".into()
                                             }
                                             Some((c, SortDirection::Descending))
                                                 if c == col_idx =>
                                             {
-                                                " ▼"
+                                                "▼".into()
                                             }
-                                            _ => "",
+                                            _ => "".into(),
                                         };
-                                        let display_label: SharedString =
-                                            format!("{}{}", label, indicator).into();
+                                        let has_indicator = !indicator.is_empty();
                                         let entity = entity.clone();
                                         div()
                                             .id(("header", col_idx))
                                             .w(px(width))
                                             .flex_shrink_0()
                                             .px_1()
-                                            .whitespace_nowrap()
-                                            .truncate()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
                                             .cursor_pointer()
                                             .on_click(move |_event, _window, cx| {
                                                 entity.update(cx, |this, cx| {
@@ -384,7 +398,22 @@ impl Render for CsvrApp {
                                                     cx.notify();
                                                 });
                                             })
-                                            .child(display_label)
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .truncate()
+                                                    .child(label.clone()),
+                                            )
+                                            .when(has_indicator, |el| {
+                                                el.child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .ml_0p5()
+                                                        .child(indicator),
+                                                )
+                                            })
                                     }),
                             ),
                     ),
@@ -765,6 +794,23 @@ mod tests {
         // Row 1 has no column 1, should use "" as default
         let result = sort_indices(&rows, &indices, 1, SortDirection::Ascending);
         assert_eq!(result, vec![1, 0]);
+    }
+
+    #[test]
+    fn sort_numeric_with_nan() {
+        // "NaN" parses as f64::NAN; total_cmp places NaN after all other values
+        let rows = make_rc_rows(&[&["NaN"], &["0"], &["1"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 2, 0]); // 0 < 1 < NaN
+    }
+
+    #[test]
+    fn sort_numeric_with_nan_descending() {
+        let rows = make_rc_rows(&[&["NaN"], &["0"], &["1"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, SortDirection::Descending);
+        assert_eq!(result, vec![0, 2, 1]); // NaN > 1 > 0
     }
 }
 

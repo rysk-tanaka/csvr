@@ -1,4 +1,4 @@
-use std::{io::BufReader, ops::Range, rc::Rc};
+use std::{io::BufReader, io::IsTerminal, ops::Range, rc::Rc};
 
 use gpui::{
     App, Application, Bounds, Context, Render, SharedString, UniformListScrollHandle, Window,
@@ -40,7 +40,7 @@ fn compute_column_widths(data: &CsvData) -> Vec<f32> {
                 .map(|row| row.get(col_idx).map_or(0, |cell| cell.chars().count()))
                 .max()
                 .unwrap_or(0)
-                .max(header.chars().count());
+                .max(header.to_uppercase().chars().count());
             (max_len as f32 * CHAR_WIDTH + COL_PADDING)
                 .clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
         })
@@ -118,7 +118,7 @@ impl RenderOnce for TableRow {
 }
 
 struct CsvrApp {
-    headers: Vec<String>,
+    headers: Vec<SharedString>,
     rows: Vec<Rc<Vec<String>>>,
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
@@ -131,9 +131,14 @@ impl CsvrApp {
     fn new(data: CsvData) -> Self {
         let col_widths = Rc::new(compute_column_widths(&data));
         let row_num_width = row_number_col_width(data.rows.len());
+        let headers = data
+            .headers
+            .iter()
+            .map(|h| SharedString::from(h.to_uppercase()))
+            .collect();
         let rows = data.rows.into_iter().map(Rc::new).collect();
         Self {
-            headers: data.headers,
+            headers,
             rows,
             col_widths,
             row_num_width,
@@ -179,15 +184,14 @@ impl Render for CsvrApp {
                             .child("#"),
                     )
                     .children(self.headers.iter().zip(self.col_widths.iter()).map(
-                        |(header, &width)| {
-                            let label: SharedString = header.to_uppercase().into();
+                        |(label, &width)| {
                             div()
                                 .w(px(width))
                                 .flex_shrink_0()
                                 .px_1()
                                 .whitespace_nowrap()
                                 .truncate()
-                                .child(label)
+                                .child(label.clone())
                         },
                     )),
             )
@@ -220,7 +224,13 @@ fn load_csv() -> CsvData {
     let args: Vec<String> = std::env::args().collect();
 
     // File argument takes priority over stdin
-    if args.len() >= 2 {
+    if args.len() > 2 {
+        eprintln!("Error: too many arguments");
+        eprintln!("Usage: csvr <file.csv>");
+        eprintln!("   or: cat file.csv | csvr");
+        std::process::exit(1);
+    }
+    if args.len() == 2 {
         let path = &args[1];
         let file = std::fs::File::open(path).unwrap_or_else(|e| {
             eprintln!("Error: cannot open '{}': {}", path, e);
@@ -233,7 +243,7 @@ fn load_csv() -> CsvData {
     }
 
     // Fall back to stdin when piped (stream directly to avoid double buffering)
-    if !atty::is(atty::Stream::Stdin) {
+    if !std::io::stdin().is_terminal() {
         let reader = BufReader::new(std::io::stdin().lock());
         return CsvData::from_reader(reader).unwrap_or_else(|e| {
             eprintln!("Error: failed to parse CSV from stdin: {}", e);

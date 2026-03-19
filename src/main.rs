@@ -8,6 +8,12 @@ use gpui::{
 
 actions!(csvr, [ToggleSearch, DismissSearch]);
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SortDirection {
+    Ascending,
+    Descending,
+}
+
 struct CsvData {
     headers: Vec<String>,
     rows: Vec<Vec<String>>,
@@ -68,6 +74,54 @@ fn filter_rows(rows: &[Rc<Vec<String>>], query: &str) -> Vec<usize> {
         })
         .map(|(i, _)| i)
         .collect()
+}
+
+/// Determine which columns are numeric based on all rows.
+fn compute_numeric_columns(rows: &[Vec<String>], col_count: usize) -> Vec<bool> {
+    (0..col_count)
+        .map(|col| {
+            rows.iter().all(|row| {
+                let val = row.get(col).map(|s| s.as_str()).unwrap_or("");
+                val.is_empty() || val.parse::<f64>().is_ok()
+            })
+        })
+        .collect()
+}
+
+fn sort_indices(
+    rows: &[Rc<Vec<String>>],
+    indices: &[usize],
+    col: usize,
+    use_numeric: bool,
+    direction: SortDirection,
+) -> Vec<usize> {
+    if use_numeric {
+        // Pre-compute sort keys to avoid O(n log n) parses inside sort_by.
+        let mut keyed: Vec<(usize, f64)> = indices
+            .iter()
+            .map(|&i| {
+                let val = rows[i].get(col).map(|s| s.as_str()).unwrap_or("");
+                let n = val.parse::<f64>().unwrap_or(f64::NEG_INFINITY);
+                (i, n)
+            })
+            .collect();
+        keyed.sort_by(|(_, a), (_, b)| match direction {
+            SortDirection::Ascending => a.total_cmp(b),
+            SortDirection::Descending => b.total_cmp(a),
+        });
+        keyed.into_iter().map(|(i, _)| i).collect()
+    } else {
+        let mut sorted = indices.to_vec();
+        sorted.sort_by(|&a, &b| {
+            let val_a = rows[a].get(col).map(|s| s.as_str()).unwrap_or("");
+            let val_b = rows[b].get(col).map(|s| s.as_str()).unwrap_or("");
+            match direction {
+                SortDirection::Ascending => val_a.cmp(val_b),
+                SortDirection::Descending => val_b.cmp(val_a),
+            }
+        });
+        sorted
+    }
 }
 
 // Catppuccin Mocha palette
@@ -140,12 +194,14 @@ struct CsvrApp {
     headers: Vec<SharedString>,
     rows: Vec<Rc<Vec<String>>>,
     col_widths: Rc<Vec<f32>>,
+    numeric_columns: Vec<bool>,
     row_num_width: f32,
     scroll_handle: UniformListScrollHandle,
     visible_range: Range<usize>,
     search_active: bool,
     search_query: String,
     filtered_indices: Vec<usize>,
+    sort_state: Option<(usize, SortDirection)>,
     focus_handle: FocusHandle,
 }
 
@@ -165,6 +221,7 @@ impl CsvrApp {
     fn new(data: CsvData, cx: &mut Context<Self>) -> Self {
         let col_widths = Rc::new(compute_column_widths(&data));
         let row_num_width = row_number_col_width(data.rows.len());
+        let numeric_columns = compute_numeric_columns(&data.rows, data.headers.len());
         let headers = data
             .headers
             .iter()
@@ -176,20 +233,45 @@ impl CsvrApp {
             headers,
             rows,
             col_widths,
+            numeric_columns,
             row_num_width,
             scroll_handle: UniformListScrollHandle::new(),
             visible_range: 0..0,
             search_active: false,
             search_query: String::new(),
             filtered_indices: (0..total_rows).collect(),
+            sort_state: None,
             focus_handle: cx.focus_handle(),
+        }
+    }
+
+    fn recompute_filtered_indices(&mut self) {
+        self.filtered_indices = filter_rows(&self.rows, &self.search_query);
+        if let Some((col, direction)) = self.sort_state {
+            let use_numeric = self.numeric_columns.get(col).copied().unwrap_or(false);
+            self.filtered_indices =
+                sort_indices(&self.rows, &self.filtered_indices, col, use_numeric, direction);
         }
     }
 
     fn set_search_query(&mut self, query: String) {
         self.search_query = query;
-        self.filtered_indices = filter_rows(&self.rows, &self.search_query);
-        self.scroll_handle.scroll_to_item(0, gpui::ScrollStrategy::Top);
+        self.recompute_filtered_indices();
+        self.scroll_handle
+            .scroll_to_item(0, gpui::ScrollStrategy::Top);
+    }
+
+    fn toggle_sort(&mut self, col: usize) {
+        self.sort_state = match self.sort_state {
+            Some((c, SortDirection::Ascending)) if c == col => {
+                Some((col, SortDirection::Descending))
+            }
+            Some((c, SortDirection::Descending)) if c == col => None,
+            _ => Some((col, SortDirection::Ascending)),
+        };
+        self.recompute_filtered_indices();
+        self.scroll_handle
+            .scroll_to_item(0, gpui::ScrollStrategy::Top);
     }
 
     fn toggle_search(&mut self) {
@@ -290,17 +372,60 @@ impl Render for CsvrApp {
                                     .text_right()
                                     .child("#"),
                             )
-                            .children(self.headers.iter().zip(self.col_widths.iter()).map(
-                                |(label, &width)| {
-                                    div()
-                                        .w(px(width))
-                                        .flex_shrink_0()
-                                        .px_1()
-                                        .whitespace_nowrap()
-                                        .truncate()
-                                        .child(label.clone())
-                                },
-                            )),
+                            .children(
+                                self.headers
+                                    .iter()
+                                    .zip(self.col_widths.iter())
+                                    .enumerate()
+                                    .map(|(col_idx, (label, &width))| {
+                                        let indicator: SharedString = match self.sort_state {
+                                            Some((c, SortDirection::Ascending))
+                                                if c == col_idx =>
+                                            {
+                                                "▲".into()
+                                            }
+                                            Some((c, SortDirection::Descending))
+                                                if c == col_idx =>
+                                            {
+                                                "▼".into()
+                                            }
+                                            _ => "".into(),
+                                        };
+                                        let has_indicator = !indicator.is_empty();
+                                        let entity = entity.clone();
+                                        div()
+                                            .id(("header", col_idx))
+                                            .w(px(width))
+                                            .flex_shrink_0()
+                                            .px_1()
+                                            .flex()
+                                            .flex_row()
+                                            .items_center()
+                                            .cursor_pointer()
+                                            .on_click(move |_event, _window, cx| {
+                                                entity.update(cx, |this, cx| {
+                                                    this.toggle_sort(col_idx);
+                                                    cx.notify();
+                                                });
+                                            })
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .truncate()
+                                                    .child(label.clone()),
+                                            )
+                                            .when(has_indicator, |el| {
+                                                el.child(
+                                                    div()
+                                                        .flex_shrink_0()
+                                                        .ml_0p5()
+                                                        .child(indicator),
+                                                )
+                                            })
+                                    }),
+                            ),
                     ),
             )
             // Search bar
@@ -612,6 +737,113 @@ mod tests {
     fn filter_empty_rows() {
         let rows: Vec<Rc<Vec<String>>> = vec![];
         assert!(filter_rows(&rows, "test").is_empty());
+    }
+
+    // --- sort_indices ---
+
+    #[test]
+    fn sort_string_ascending() {
+        let rows = make_rc_rows(&[&["Charlie"], &["Alice"], &["Bob"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn sort_string_descending() {
+        let rows = make_rc_rows(&[&["Charlie"], &["Alice"], &["Bob"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Descending);
+        assert_eq!(result, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn sort_numeric_ascending() {
+        let rows = make_rc_rows(&[&["100"], &["3"], &["25"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn sort_numeric_descending() {
+        let rows = make_rc_rows(&[&["100"], &["3"], &["25"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Descending);
+        assert_eq!(result, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn sort_respects_filtered_indices() {
+        let rows = make_rc_rows(&[&["C"], &["A"], &["B"], &["D"]]);
+        let indices = vec![0, 2, 3]; // only rows 0, 2, 3
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
+        assert_eq!(result, vec![2, 0, 3]);
+    }
+
+    #[test]
+    fn sort_mixed_numeric_and_string_uses_string_comparison() {
+        let rows = make_rc_rows(&[&["banana"], &["10"], &["apple"]]);
+        let indices = vec![0, 1, 2];
+        // Column has non-numeric values, so entire column uses string comparison
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 2, 0]); // "10" < "apple" < "banana" (lexicographic)
+    }
+
+    #[test]
+    fn sort_empty_indices() {
+        let rows = make_rc_rows(&[&["A"]]);
+        let result = sort_indices(&rows, &[], 0, false, SortDirection::Ascending);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn sort_with_missing_column() {
+        let rows = make_rc_rows(&[&["A", "1"], &["B"]]);
+        let indices = vec![0, 1];
+        // Row 1 has no column 1, treated as numeric (column 1 has "1" and empty)
+        let result = sort_indices(&rows, &indices, 1, true, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 0]);
+    }
+
+    #[test]
+    fn sort_numeric_with_nan() {
+        // "NaN" parses as f64::NAN; total_cmp places NaN after all other values
+        let rows = make_rc_rows(&[&["NaN"], &["0"], &["1"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 2, 0]); // 0 < 1 < NaN
+    }
+
+    #[test]
+    fn sort_numeric_with_nan_descending() {
+        let rows = make_rc_rows(&[&["NaN"], &["0"], &["1"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Descending);
+        assert_eq!(result, vec![0, 2, 1]); // NaN > 1 > 0
+    }
+
+    // --- compute_numeric_columns ---
+
+    #[test]
+    fn numeric_columns_detection() {
+        let data = make_csv_data(&["name", "age", "score"], &[&["Alice", "30", "95.5"], &["Bob", "25", "87.0"]]);
+        let result = compute_numeric_columns(&data.rows, data.headers.len());
+        assert_eq!(result, vec![false, true, true]);
+    }
+
+    #[test]
+    fn numeric_columns_with_empty_values() {
+        let data = make_csv_data(&["val"], &[&["1"], &[""], &["3"]]);
+        let result = compute_numeric_columns(&data.rows, data.headers.len());
+        assert_eq!(result, vec![true]); // empty values don't disqualify numeric
+    }
+
+    #[test]
+    fn numeric_columns_mixed() {
+        let data = make_csv_data(&["col"], &[&["1"], &["abc"], &["3"]]);
+        let result = compute_numeric_columns(&data.rows, data.headers.len());
+        assert_eq!(result, vec![false]);
     }
 }
 

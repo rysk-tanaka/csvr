@@ -76,19 +76,25 @@ fn filter_rows(rows: &[Rc<Vec<String>>], query: &str) -> Vec<usize> {
         .collect()
 }
 
+/// Determine which columns are numeric based on all rows.
+fn compute_numeric_columns(rows: &[Vec<String>], col_count: usize) -> Vec<bool> {
+    (0..col_count)
+        .map(|col| {
+            rows.iter().all(|row| {
+                let val = row.get(col).map(|s| s.as_str()).unwrap_or("");
+                val.is_empty() || val.parse::<f64>().is_ok()
+            })
+        })
+        .collect()
+}
+
 fn sort_indices(
     rows: &[Rc<Vec<String>>],
     indices: &[usize],
     col: usize,
+    use_numeric: bool,
     direction: SortDirection,
 ) -> Vec<usize> {
-    // Decide comparison mode based on the given indices to guarantee total order.
-    // When combined with filtering, this means filtered-in rows determine the mode.
-    let use_numeric = indices.iter().all(|&i| {
-        let val = rows[i].get(col).map(|s| s.as_str()).unwrap_or("");
-        val.is_empty() || val.parse::<f64>().is_ok()
-    });
-
     if use_numeric {
         // Pre-compute sort keys to avoid O(n log n) parses inside sort_by.
         let mut keyed: Vec<(usize, f64)> = indices
@@ -188,6 +194,7 @@ struct CsvrApp {
     headers: Vec<SharedString>,
     rows: Vec<Rc<Vec<String>>>,
     col_widths: Rc<Vec<f32>>,
+    numeric_columns: Vec<bool>,
     row_num_width: f32,
     scroll_handle: UniformListScrollHandle,
     visible_range: Range<usize>,
@@ -214,6 +221,7 @@ impl CsvrApp {
     fn new(data: CsvData, cx: &mut Context<Self>) -> Self {
         let col_widths = Rc::new(compute_column_widths(&data));
         let row_num_width = row_number_col_width(data.rows.len());
+        let numeric_columns = compute_numeric_columns(&data.rows, data.headers.len());
         let headers = data
             .headers
             .iter()
@@ -225,6 +233,7 @@ impl CsvrApp {
             headers,
             rows,
             col_widths,
+            numeric_columns,
             row_num_width,
             scroll_handle: UniformListScrollHandle::new(),
             visible_range: 0..0,
@@ -239,8 +248,9 @@ impl CsvrApp {
     fn recompute_filtered_indices(&mut self) {
         self.filtered_indices = filter_rows(&self.rows, &self.search_query);
         if let Some((col, direction)) = self.sort_state {
+            let use_numeric = self.numeric_columns.get(col).copied().unwrap_or(false);
             self.filtered_indices =
-                sort_indices(&self.rows, &self.filtered_indices, col, direction);
+                sort_indices(&self.rows, &self.filtered_indices, col, use_numeric, direction);
         }
     }
 
@@ -735,7 +745,7 @@ mod tests {
     fn sort_string_ascending() {
         let rows = make_rc_rows(&[&["Charlie"], &["Alice"], &["Bob"]]);
         let indices = vec![0, 1, 2];
-        let result = sort_indices(&rows, &indices, 0, SortDirection::Ascending);
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
         assert_eq!(result, vec![1, 2, 0]);
     }
 
@@ -743,7 +753,7 @@ mod tests {
     fn sort_string_descending() {
         let rows = make_rc_rows(&[&["Charlie"], &["Alice"], &["Bob"]]);
         let indices = vec![0, 1, 2];
-        let result = sort_indices(&rows, &indices, 0, SortDirection::Descending);
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Descending);
         assert_eq!(result, vec![0, 2, 1]);
     }
 
@@ -751,7 +761,7 @@ mod tests {
     fn sort_numeric_ascending() {
         let rows = make_rc_rows(&[&["100"], &["3"], &["25"]]);
         let indices = vec![0, 1, 2];
-        let result = sort_indices(&rows, &indices, 0, SortDirection::Ascending);
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Ascending);
         assert_eq!(result, vec![1, 2, 0]);
     }
 
@@ -759,7 +769,7 @@ mod tests {
     fn sort_numeric_descending() {
         let rows = make_rc_rows(&[&["100"], &["3"], &["25"]]);
         let indices = vec![0, 1, 2];
-        let result = sort_indices(&rows, &indices, 0, SortDirection::Descending);
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Descending);
         assert_eq!(result, vec![0, 2, 1]);
     }
 
@@ -767,7 +777,7 @@ mod tests {
     fn sort_respects_filtered_indices() {
         let rows = make_rc_rows(&[&["C"], &["A"], &["B"], &["D"]]);
         let indices = vec![0, 2, 3]; // only rows 0, 2, 3
-        let result = sort_indices(&rows, &indices, 0, SortDirection::Ascending);
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
         assert_eq!(result, vec![2, 0, 3]);
     }
 
@@ -776,14 +786,14 @@ mod tests {
         let rows = make_rc_rows(&[&["banana"], &["10"], &["apple"]]);
         let indices = vec![0, 1, 2];
         // Column has non-numeric values, so entire column uses string comparison
-        let result = sort_indices(&rows, &indices, 0, SortDirection::Ascending);
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
         assert_eq!(result, vec![1, 2, 0]); // "10" < "apple" < "banana" (lexicographic)
     }
 
     #[test]
     fn sort_empty_indices() {
         let rows = make_rc_rows(&[&["A"]]);
-        let result = sort_indices(&rows, &[], 0, SortDirection::Ascending);
+        let result = sort_indices(&rows, &[], 0, false, SortDirection::Ascending);
         assert!(result.is_empty());
     }
 
@@ -791,8 +801,8 @@ mod tests {
     fn sort_with_missing_column() {
         let rows = make_rc_rows(&[&["A", "1"], &["B"]]);
         let indices = vec![0, 1];
-        // Row 1 has no column 1, should use "" as default
-        let result = sort_indices(&rows, &indices, 1, SortDirection::Ascending);
+        // Row 1 has no column 1, treated as numeric (column 1 has "1" and empty)
+        let result = sort_indices(&rows, &indices, 1, true, SortDirection::Ascending);
         assert_eq!(result, vec![1, 0]);
     }
 
@@ -801,7 +811,7 @@ mod tests {
         // "NaN" parses as f64::NAN; total_cmp places NaN after all other values
         let rows = make_rc_rows(&[&["NaN"], &["0"], &["1"]]);
         let indices = vec![0, 1, 2];
-        let result = sort_indices(&rows, &indices, 0, SortDirection::Ascending);
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Ascending);
         assert_eq!(result, vec![1, 2, 0]); // 0 < 1 < NaN
     }
 
@@ -809,8 +819,31 @@ mod tests {
     fn sort_numeric_with_nan_descending() {
         let rows = make_rc_rows(&[&["NaN"], &["0"], &["1"]]);
         let indices = vec![0, 1, 2];
-        let result = sort_indices(&rows, &indices, 0, SortDirection::Descending);
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Descending);
         assert_eq!(result, vec![0, 2, 1]); // NaN > 1 > 0
+    }
+
+    // --- compute_numeric_columns ---
+
+    #[test]
+    fn numeric_columns_detection() {
+        let data = make_csv_data(&["name", "age", "score"], &[&["Alice", "30", "95.5"], &["Bob", "25", "87.0"]]);
+        let result = compute_numeric_columns(&data.rows, data.headers.len());
+        assert_eq!(result, vec![false, true, true]);
+    }
+
+    #[test]
+    fn numeric_columns_with_empty_values() {
+        let data = make_csv_data(&["val"], &[&["1"], &[""], &["3"]]);
+        let result = compute_numeric_columns(&data.rows, data.headers.len());
+        assert_eq!(result, vec![true]); // empty values don't disqualify numeric
+    }
+
+    #[test]
+    fn numeric_columns_mixed() {
+        let data = make_csv_data(&["col"], &[&["1"], &["abc"], &["3"]]);
+        let result = compute_numeric_columns(&data.rows, data.headers.len());
+        assert_eq!(result, vec![false]);
     }
 }
 

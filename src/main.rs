@@ -1,10 +1,12 @@
 use std::{io::BufReader, io::IsTerminal, ops::Range, rc::Rc};
 
 use gpui::{
-    App, Application, Bounds, Context, ListHorizontalSizingBehavior, Render, SharedString,
-    UniformListScrollHandle, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
-    uniform_list,
+    App, Application, Bounds, Context, Focusable, FocusHandle, KeyBinding, KeyDownEvent,
+    ListHorizontalSizingBehavior, Render, SharedString, UniformListScrollHandle, Window,
+    WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size, uniform_list,
 };
+
+actions!(csvr, [ToggleSearch, DismissSearch]);
 
 struct CsvData {
     headers: Vec<String>,
@@ -53,18 +55,35 @@ fn row_number_col_width(total_rows: usize) -> f32 {
     (digits as f32 * CHAR_WIDTH + ROW_NUM_WIDTH).max(40.0)
 }
 
+fn filter_rows(rows: &[Rc<Vec<String>>], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..rows.len()).collect();
+    }
+    let query_lower = query.to_lowercase();
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            row.iter()
+                .any(|cell| cell.to_lowercase().contains(&query_lower))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
 // Catppuccin Mocha palette
 const BG_BASE: u32 = 0x1e1e2e;
 const TEXT_MAIN: u32 = 0xcdd6f4;
 const TEXT_SUBTEXT: u32 = 0xa6adc8;
 const BORDER_COLOR: u32 = 0x45475a;
 const HEADER_BG: u32 = 0x181825;
-const ROW_ALT_BG: u32 = 0x1e1e2e;   // Base
-const ROW_EVEN_BG: u32 = 0x11111b;  // Crust (darker for contrast)
+const ROW_ALT_BG: u32 = 0x1e1e2e; // Base
+const ROW_EVEN_BG: u32 = 0x11111b; // Crust (darker for contrast)
+const SEARCH_BG: u32 = 0x313244; // Surface0
 
 #[derive(IntoElement)]
 struct TableRow {
     ix: usize,
+    row_num: usize,
     cells: Rc<Vec<String>>,
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
@@ -92,7 +111,7 @@ impl RenderOnce for TableRow {
                     .px_1()
                     .text_color(rgb(TEXT_SUBTEXT))
                     .text_right()
-                    .child((self.ix + 1).to_string()),
+                    .child(self.row_num.to_string()),
             )
             .children(
                 self.col_widths
@@ -123,8 +142,17 @@ struct CsvrApp {
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
     scroll_handle: UniformListScrollHandle,
-    /// Will be used for incremental search highlighting
     visible_range: Range<usize>,
+    search_active: bool,
+    search_query: String,
+    filtered_indices: Vec<usize>,
+    focus_handle: FocusHandle,
+}
+
+impl Focusable for CsvrApp {
+    fn focus_handle(&self, _: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
 }
 
 impl CsvrApp {
@@ -134,7 +162,7 @@ impl CsvrApp {
         self.scroll_handle.0.borrow().base_handle.offset().x
     }
 
-    fn new(data: CsvData) -> Self {
+    fn new(data: CsvData, cx: &mut Context<Self>) -> Self {
         let col_widths = Rc::new(compute_column_widths(&data));
         let row_num_width = row_number_col_width(data.rows.len());
         let headers = data
@@ -142,6 +170,7 @@ impl CsvrApp {
             .iter()
             .map(|h| SharedString::from(h.to_uppercase()))
             .collect();
+        let total_rows = data.rows.len();
         let rows = data.rows.into_iter().map(Rc::new).collect();
         Self {
             headers,
@@ -150,7 +179,30 @@ impl CsvrApp {
             row_num_width,
             scroll_handle: UniformListScrollHandle::new(),
             visible_range: 0..0,
+            search_active: false,
+            search_query: String::new(),
+            filtered_indices: (0..total_rows).collect(),
+            focus_handle: cx.focus_handle(),
         }
+    }
+
+    fn set_search_query(&mut self, query: String) {
+        self.search_query = query;
+        self.filtered_indices = filter_rows(&self.rows, &self.search_query);
+        self.scroll_handle.scroll_to_item(0, gpui::ScrollStrategy::Top);
+    }
+
+    fn toggle_search(&mut self) {
+        if self.search_active {
+            self.close_search();
+        } else {
+            self.search_active = true;
+        }
+    }
+
+    fn close_search(&mut self) {
+        self.search_active = false;
+        self.set_search_query(String::new());
     }
 }
 
@@ -158,8 +210,53 @@ impl Render for CsvrApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let h_offset = self.h_scroll_offset();
+        let filtered_count = self.filtered_indices.len();
+        let total_count = self.rows.len();
 
         div()
+            .track_focus(&self.focus_handle(cx))
+            .key_context("CsvrApp")
+            .on_action(cx.listener(|this, _: &ToggleSearch, _window, cx| {
+                this.toggle_search();
+                cx.notify();
+            }))
+            .on_action(cx.listener(|this, _: &DismissSearch, _window, cx| {
+                if this.search_active {
+                    this.close_search();
+                    cx.notify();
+                }
+            }))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+                let keystroke = &event.keystroke;
+
+                // `/` opens search only when inactive
+                if !this.search_active && keystroke.key_char.as_deref() == Some("/") {
+                    this.search_active = true;
+                    cx.notify();
+                    return;
+                }
+
+                if !this.search_active {
+                    return;
+                }
+
+                // Ignore modifier combos (Cmd+C, etc.)
+                if keystroke.modifiers.platform || keystroke.modifiers.control {
+                    return;
+                }
+
+                if keystroke.key == "backspace" {
+                    let mut q = this.search_query.clone();
+                    q.pop();
+                    this.set_search_query(q);
+                    cx.notify();
+                } else if let Some(ch) = &keystroke.key_char {
+                    let mut q = this.search_query.clone();
+                    q.push_str(ch);
+                    this.set_search_query(q);
+                    cx.notify();
+                }
+            }))
             .font_family(".SystemUIFont")
             .bg(rgb(BG_BASE))
             .text_color(rgb(TEXT_MAIN))
@@ -206,17 +303,63 @@ impl Render for CsvrApp {
                             )),
                     ),
             )
+            // Search bar
+            .when(self.search_active, |el| {
+                let query_display: SharedString = if self.search_query.is_empty() {
+                    "Type to search...".into()
+                } else {
+                    self.search_query.clone().into()
+                };
+                let query_color = if self.search_query.is_empty() {
+                    TEXT_SUBTEXT
+                } else {
+                    TEXT_MAIN
+                };
+                el.child(
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .bg(rgb(SEARCH_BG))
+                        .border_b_1()
+                        .border_color(rgb(BORDER_COLOR))
+                        .flex()
+                        .flex_row()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(rgb(TEXT_SUBTEXT))
+                                .text_xs()
+                                .child("/"),
+                        )
+                        .child(
+                            div()
+                                .flex_1()
+                                .text_color(rgb(query_color))
+                                .child(query_display),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(TEXT_SUBTEXT))
+                                .text_xs()
+                                .child(format!("{} / {} rows", filtered_count, total_count)),
+                        ),
+                )
+            })
             // Body
             .child(
                 div().flex_1().size_full().child(
-                    uniform_list(entity, "rows", self.rows.len(), {
+                    uniform_list(entity, "rows", filtered_count, {
                         move |this, range, _, _| {
                             this.visible_range = range.clone();
                             range
                                 .filter_map(|i| {
-                                    this.rows.get(i).map(|cells| TableRow {
+                                    let original_idx = *this.filtered_indices.get(i)?;
+                                    Some(TableRow {
                                         ix: i,
-                                        cells: cells.clone(),
+                                        row_num: original_idx + 1,
+                                        cells: this.rows.get(original_idx)?.clone(),
                                         col_widths: this.col_widths.clone(),
                                         row_num_width: this.row_num_width,
                                     })
@@ -284,6 +427,12 @@ mod tests {
                 .map(|row| row.iter().map(|s| s.to_string()).collect())
                 .collect(),
         }
+    }
+
+    fn make_rc_rows(rows: &[&[&str]]) -> Vec<Rc<Vec<String>>> {
+        rows.iter()
+            .map(|row| Rc::new(row.iter().map(|s| s.to_string()).collect()))
+            .collect()
     }
 
     // --- CsvData::from_reader ---
@@ -425,18 +574,66 @@ mod tests {
         // 7 digits => 7 * 7.5 + 16 = 68.5
         assert!((w - 68.5).abs() < 0.01);
     }
+
+    // --- filter_rows ---
+
+    #[test]
+    fn filter_empty_query_returns_all() {
+        let rows = make_rc_rows(&[&["Alice", "30"], &["Bob", "25"]]);
+        assert_eq!(filter_rows(&rows, ""), vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_matches_substring() {
+        let rows = make_rc_rows(&[&["Alice", "Tokyo"], &["Bob", "Osaka"], &["Carol", "Tokyo"]]);
+        assert_eq!(filter_rows(&rows, "tokyo"), vec![0, 2]);
+    }
+
+    #[test]
+    fn filter_case_insensitive() {
+        let rows = make_rc_rows(&[&["ALICE"], &["alice"], &["Alice"]]);
+        assert_eq!(filter_rows(&rows, "alice"), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filter_no_matches() {
+        let rows = make_rc_rows(&[&["Alice"], &["Bob"]]);
+        let result = filter_rows(&rows, "xyz");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_matches_any_column() {
+        let rows = make_rc_rows(&[&["Alice", "30", "Tokyo"], &["Bob", "25", "Osaka"]]);
+        assert_eq!(filter_rows(&rows, "25"), vec![1]);
+    }
+
+    #[test]
+    fn filter_empty_rows() {
+        let rows: Vec<Rc<Vec<String>>> = vec![];
+        assert!(filter_rows(&rows, "test").is_empty());
+    }
 }
 
 fn main() {
     let data = load_csv();
     Application::new().run(|cx: &mut App| {
+        cx.bind_keys([
+            KeyBinding::new("cmd-f", ToggleSearch, Some("CsvrApp")),
+            KeyBinding::new("escape", DismissSearch, Some("CsvrApp")),
+        ]);
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(bounds)),
                 ..Default::default()
             },
-            |_, cx| cx.new(|_| CsvrApp::new(data)),
+            |window, cx| {
+                let entity = cx.new(|cx| CsvrApp::new(data, cx));
+                let focus = entity.read(cx).focus_handle.clone();
+                window.focus(&focus);
+                entity
+            },
         )
         .unwrap_or_else(|e| {
             eprintln!("Error: failed to open window: {}", e);

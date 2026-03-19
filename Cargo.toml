@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed.git", tag = "v0.188.6" }
 csv = "1"
+atty = "0.2"

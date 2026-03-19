@@ -128,6 +128,12 @@ struct CsvrApp {
 }
 
 impl CsvrApp {
+    // HACK: GPUI has no public API for horizontal scroll offset on UniformListScrollHandle.
+    // Access internal fields directly. Replace when a public API becomes available.
+    fn h_scroll_offset(&self) -> gpui::Pixels {
+        self.scroll_handle.0.borrow().base_handle.offset().x
+    }
+
     fn new(data: CsvData) -> Self {
         let col_widths = Rc::new(compute_column_widths(&data));
         let row_num_width = row_number_col_width(data.rows.len());
@@ -151,8 +157,7 @@ impl CsvrApp {
 impl Render for CsvrApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
-        // Read horizontal offset from uniform_list's scroll state
-        let h_offset = self.scroll_handle.0.borrow().base_handle.offset().x;
+        let h_offset = self.h_scroll_offset();
 
         div()
             .font_family(".SystemUIFont")
@@ -162,11 +167,9 @@ impl Render for CsvrApp {
             .size_full()
             .flex()
             .flex_col()
-            // Header
+            // Header (outer container keeps background/border fixed)
             .child(
                 div()
-                    .flex()
-                    .flex_row()
                     .w_full()
                     .overflow_hidden()
                     .border_b_1()
@@ -176,28 +179,32 @@ impl Render for CsvrApp {
                     .py_1()
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
-                    // Shift header by the same horizontal offset as the body
-                    .ml(h_offset)
-                    // Row number header
+                    // Inner row shifts with horizontal scroll offset
                     .child(
                         div()
-                            .w(px(self.row_num_width))
-                            .flex_shrink_0()
-                            .px_1()
-                            .text_right()
-                            .child("#"),
-                    )
-                    .children(self.headers.iter().zip(self.col_widths.iter()).map(
-                        |(label, &width)| {
-                            div()
-                                .w(px(width))
-                                .flex_shrink_0()
-                                .px_1()
-                                .whitespace_nowrap()
-                                .truncate()
-                                .child(label.clone())
-                        },
-                    )),
+                            .flex()
+                            .flex_row()
+                            .ml(h_offset)
+                            .child(
+                                div()
+                                    .w(px(self.row_num_width))
+                                    .flex_shrink_0()
+                                    .px_1()
+                                    .text_right()
+                                    .child("#"),
+                            )
+                            .children(self.headers.iter().zip(self.col_widths.iter()).map(
+                                |(label, &width)| {
+                                    div()
+                                        .w(px(width))
+                                        .flex_shrink_0()
+                                        .px_1()
+                                        .whitespace_nowrap()
+                                        .truncate()
+                                        .child(label.clone())
+                                },
+                            )),
+                    ),
             )
             // Body
             .child(

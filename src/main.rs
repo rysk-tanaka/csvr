@@ -1,4 +1,4 @@
-use std::{io::Read as _, ops::Range, rc::Rc};
+use std::{io::BufReader, ops::Range, rc::Rc};
 
 use gpui::{
     App, Application, Bounds, Context, Render, SharedString, UniformListScrollHandle, Window,
@@ -37,10 +37,10 @@ fn compute_column_widths(data: &CsvData) -> Vec<f32> {
         .map(|(col_idx, header)| {
             let max_len = data.rows[..sample_count]
                 .iter()
-                .map(|row| row.get(col_idx).map_or(0, |cell| cell.len()))
+                .map(|row| row.get(col_idx).map_or(0, |cell| cell.chars().count()))
                 .max()
                 .unwrap_or(0)
-                .max(header.len());
+                .max(header.chars().count());
             (max_len as f32 * CHAR_WIDTH + COL_PADDING)
                 .clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
         })
@@ -48,11 +48,7 @@ fn compute_column_widths(data: &CsvData) -> Vec<f32> {
 }
 
 fn row_number_col_width(total_rows: usize) -> f32 {
-    let digits = if total_rows == 0 {
-        1
-    } else {
-        ((total_rows as f64).log10().floor() as usize) + 1
-    };
+    let digits = total_rows.max(1).ilog10() as usize + 1;
     (digits as f32 * CHAR_WIDTH + ROW_NUM_WIDTH).max(40.0)
 }
 
@@ -62,8 +58,8 @@ const TEXT_MAIN: u32 = 0xcdd6f4;
 const TEXT_SUBTEXT: u32 = 0xa6adc8;
 const BORDER_COLOR: u32 = 0x45475a;
 const HEADER_BG: u32 = 0x181825;
-const ROW_ALT_BG: u32 = 0x1e1e2e;
-const ROW_EVEN_BG: u32 = 0x181825;
+const ROW_ALT_BG: u32 = 0x1e1e2e;   // Base
+const ROW_EVEN_BG: u32 = 0x11111b;  // Crust (darker for contrast)
 
 #[derive(IntoElement)]
 struct TableRow {
@@ -96,7 +92,7 @@ impl RenderOnce for TableRow {
                     .px_1()
                     .text_color(rgb(TEXT_SUBTEXT))
                     .text_right()
-                    .child(format!("{}", self.ix + 1)),
+                    .child((self.ix + 1).to_string()),
             )
             .children(
                 self.col_widths
@@ -127,6 +123,7 @@ struct CsvrApp {
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
     scroll_handle: UniformListScrollHandle,
+    /// Will be used for incremental search highlighting
     visible_range: Range<usize>,
 }
 
@@ -222,30 +219,31 @@ impl Render for CsvrApp {
 fn load_csv() -> CsvData {
     let args: Vec<String> = std::env::args().collect();
 
-    // stdin (pipe) takes priority when not a tty
+    // File argument takes priority over stdin
+    if args.len() >= 2 {
+        let path = &args[1];
+        let file = std::fs::File::open(path).unwrap_or_else(|e| {
+            eprintln!("Error: cannot open '{}': {}", path, e);
+            std::process::exit(1);
+        });
+        return CsvData::from_reader(file).unwrap_or_else(|e| {
+            eprintln!("Error: failed to parse CSV '{}': {}", path, e);
+            std::process::exit(1);
+        });
+    }
+
+    // Fall back to stdin when piped (stream directly to avoid double buffering)
     if !atty::is(atty::Stream::Stdin) {
-        let mut buf = Vec::new();
-        std::io::stdin()
-            .read_to_end(&mut buf)
-            .expect("Failed to read stdin");
-        return CsvData::from_reader(buf.as_slice()).expect("Failed to parse CSV from stdin");
+        let reader = BufReader::new(std::io::stdin().lock());
+        return CsvData::from_reader(reader).unwrap_or_else(|e| {
+            eprintln!("Error: failed to parse CSV from stdin: {}", e);
+            std::process::exit(1);
+        });
     }
 
-    if args.len() < 2 {
-        eprintln!("Usage: csvr <file.csv>");
-        eprintln!("   or: cat file.csv | csvr");
-        std::process::exit(1);
-    }
-
-    let path = &args[1];
-    let file = std::fs::File::open(path).unwrap_or_else(|e| {
-        eprintln!("Error: cannot open '{}': {}", path, e);
-        std::process::exit(1);
-    });
-    CsvData::from_reader(file).unwrap_or_else(|e| {
-        eprintln!("Error: failed to parse CSV: {}", e);
-        std::process::exit(1);
-    })
+    eprintln!("Usage: csvr <file.csv>");
+    eprintln!("   or: cat file.csv | csvr");
+    std::process::exit(1);
 }
 
 #[cfg(test)]
@@ -343,6 +341,22 @@ mod tests {
         assert!((widths[0] - 106.5).abs() < 0.01);
     }
 
+    #[test]
+    fn parse_ragged_rows() {
+        let input = "a,b,c\n1,2\n4,5,6\n";
+        let result = CsvData::from_reader(input.as_bytes());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn column_widths_short_rows() {
+        let data = make_csv_data(&["a", "b", "c"], &[&["x", "y"]]);
+        let widths = compute_column_widths(&data);
+        assert_eq!(widths.len(), 3);
+        // 3rd column: header "c" (1 char) only => 1 * 7.5 + 24 = 31.5 => MIN_COL_WIDTH
+        assert!((widths[2] - MIN_COL_WIDTH).abs() < 0.01);
+    }
+
     // --- row_number_col_width ---
 
     #[test]
@@ -355,6 +369,13 @@ mod tests {
     #[test]
     fn row_num_width_single_digit() {
         let w = row_number_col_width(9);
+        assert!((w - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn row_num_width_boundary_ten() {
+        let w = row_number_col_width(10);
+        // 2 digits => 2 * 7.5 + 16 = 31.0 => clamped to 40.0
         assert!((w - 40.0).abs() < 0.01);
     }
 
@@ -391,7 +412,11 @@ fn main() {
             },
             |_, cx| cx.new(|_| CsvrApp::new(data)),
         )
-        .unwrap();
+        .unwrap_or_else(|e| {
+            eprintln!("Error: failed to open window: {}", e);
+            eprintln!("Ensure Xcode and Metal are properly installed.");
+            std::process::exit(1);
+        });
         cx.activate(true);
     });
 }

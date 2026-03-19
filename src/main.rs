@@ -220,15 +220,19 @@ impl Render for CsvrApp {
     }
 }
 
+fn print_usage_and_exit(msg: &str) -> ! {
+    eprintln!("Error: {}", msg);
+    eprintln!("Usage: csvr <file.csv>");
+    eprintln!("   or: cat file.csv | csvr");
+    std::process::exit(1);
+}
+
 fn load_csv() -> CsvData {
     let args: Vec<String> = std::env::args().collect();
 
     // File argument takes priority over stdin
     if args.len() > 2 {
-        eprintln!("Error: too many arguments");
-        eprintln!("Usage: csvr <file.csv>");
-        eprintln!("   or: cat file.csv | csvr");
-        std::process::exit(1);
+        print_usage_and_exit("too many arguments");
     }
     if args.len() == 2 {
         let path = &args[1];
@@ -242,7 +246,7 @@ fn load_csv() -> CsvData {
         });
     }
 
-    // Fall back to stdin when piped (stream directly to avoid double buffering)
+    // Fall back to stdin when piped (BufReader streams without loading entire input into memory)
     if !std::io::stdin().is_terminal() {
         let reader = BufReader::new(std::io::stdin().lock());
         return CsvData::from_reader(reader).unwrap_or_else(|e| {
@@ -251,9 +255,7 @@ fn load_csv() -> CsvData {
         });
     }
 
-    eprintln!("Usage: csvr <file.csv>");
-    eprintln!("   or: cat file.csv | csvr");
-    std::process::exit(1);
+    print_usage_and_exit("no input provided");
 }
 
 #[cfg(test)]

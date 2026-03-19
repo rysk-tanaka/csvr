@@ -1,8 +1,9 @@
 use std::{io::BufReader, io::IsTerminal, ops::Range, rc::Rc};
 
 use gpui::{
-    App, Application, Bounds, Context, Render, SharedString, UniformListScrollHandle, Window,
-    WindowBounds, WindowOptions, div, prelude::*, px, rgb, size, uniform_list,
+    App, Application, Bounds, Context, ListHorizontalSizingBehavior, Render, SharedString,
+    UniformListScrollHandle, Window, WindowBounds, WindowOptions, div, prelude::*, px, rgb, size,
+    uniform_list,
 };
 
 struct CsvData {
@@ -80,7 +81,6 @@ impl RenderOnce for TableRow {
         div()
             .flex()
             .flex_row()
-            .w_full()
             .border_b_1()
             .border_color(rgb(BORDER_COLOR))
             .bg(rgb(bg))
@@ -151,6 +151,8 @@ impl CsvrApp {
 impl Render for CsvrApp {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        // Read horizontal offset from uniform_list's scroll state
+        let h_offset = self.scroll_handle.0.borrow().base_handle.offset().x;
 
         div()
             .font_family(".SystemUIFont")
@@ -174,6 +176,8 @@ impl Render for CsvrApp {
                     .py_1()
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
+                    // Shift header by the same horizontal offset as the body
+                    .ml(h_offset)
                     // Row number header
                     .child(
                         div()
@@ -213,6 +217,9 @@ impl Render for CsvrApp {
                                 .collect()
                         }
                     })
+                    .with_horizontal_sizing_behavior(
+                        ListHorizontalSizingBehavior::Unconstrained,
+                    )
                     .size_full()
                     .track_scroll(self.scroll_handle.clone()),
                 ),

@@ -38,6 +38,7 @@ struct TableRow {
     cells: Rc<Vec<String>>,
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
+    min_row_width: f32,
 }
 
 impl RenderOnce for TableRow {
@@ -51,6 +52,7 @@ impl RenderOnce for TableRow {
         div()
             .flex()
             .flex_row()
+            .min_w(px(self.min_row_width))
             .border_b_1()
             .border_color(rgb(BORDER_COLOR))
             .bg(rgb(bg))
@@ -275,11 +277,12 @@ impl CsvrApp {
 }
 
 impl Render for CsvrApp {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let h_offset = self.h_scroll_offset();
         let filtered_count = self.filtered_indices.len();
         let total_count = self.rows.len();
+        let viewport_width = window.viewport_size().width.0;
 
         div()
             .track_focus(&self.focus_handle(cx))
@@ -415,7 +418,7 @@ impl Render for CsvrApp {
                                                 )
                                             })
                                     }),
-                            ),
+                            )
                     ),
             )
             // Search bar
@@ -650,6 +653,7 @@ impl Render for CsvrApp {
                                         cells: this.rows.get(original_idx)?.clone(),
                                         col_widths: this.col_widths.clone(),
                                         row_num_width: this.row_num_width,
+                                        min_row_width: viewport_width,
                                     })
                                 })
                                 .collect()

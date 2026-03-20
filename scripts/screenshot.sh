@@ -8,6 +8,7 @@ SAMPLE_CSV="$PROJECT_DIR/examples/sample.csv"
 OUTPUT_DIR="$PROJECT_DIR/docs/images"
 WAIT_LAUNCH=3
 WAIT_ACTION=1
+WAIT_SHORT=0.5
 
 # --- helpers ---
 
@@ -106,13 +107,13 @@ capture "$WID" "$OUTPUT_DIR/table.png"
 # 2) Search — open with Cmd+F, type filter text
 echo "==> Capturing search view..."
 send_keys 'keystroke "f" using command down'
-sleep 0.5
+sleep "$WAIT_SHORT"
 send_keys 'keystroke "Tech"'
 sleep "$WAIT_ACTION"
 capture "$WID" "$OUTPUT_DIR/search.png"
 # close search before chart capture
 send_keys 'key code 53' # Escape
-sleep 0.3
+sleep "$WAIT_SHORT"
 
 # 3) Chart — open with Cmd+G
 echo "==> Capturing chart view..."

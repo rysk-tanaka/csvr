@@ -326,7 +326,8 @@ impl CsvrApp {
         let (row, col) = match self.selected_cell {
             Some((r, c)) => (r, c),
             None => {
-                self.selected_cell = Some((0, Some(0)));
+                let initial_col = if col_count > 0 { Some(0) } else { None };
+                self.selected_cell = Some((0, initial_col));
                 self.ensure_visible(0);
                 return;
             }
@@ -335,12 +336,12 @@ impl CsvrApp {
         let new_row = (row as isize + row_delta).clamp(0, row_count as isize - 1) as usize;
 
         let new_col = match col {
-            Some(c) => {
+            Some(c) if col_count > 0 => {
                 let new_c = (c as isize + col_delta).clamp(0, col_count as isize - 1) as usize;
                 Some(new_c)
             }
-            None => {
-                if col_delta > 0 {
+            _ => {
+                if col_delta > 0 && col_count > 0 {
                     Some(0)
                 } else {
                     None

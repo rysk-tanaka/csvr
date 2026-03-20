@@ -15,6 +15,15 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 1
 fi
 
+# Validate wait-time variables are numeric
+for var_name in WAIT_LAUNCH WAIT_ACTION WAIT_SHORT; do
+  val="${!var_name}"
+  if ! [[ "$val" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+    echo "error: $var_name must be a non-negative number, got '$val'" >&2
+    exit 1
+  fi
+done
+
 # --- helpers ---
 
 get_window_id() {
@@ -45,14 +54,16 @@ if let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) a
   echo "$output"
 }
 
-# NOTE: $1 is interpolated into AppleScript; only pass trusted literals.
+# NOTE: $2 is interpolated into AppleScript; only pass trusted literals.
 send_keys() {
+  local pid="$1"
+  local cmd="$2"
   local output
   if ! output=$(osascript -e "
     tell application \"System Events\"
-      tell (first process whose unix id is $APP_PID)
+      tell (first process whose unix id is $pid)
         set frontmost to true
-        $1
+        $cmd
       end tell
     end tell
   " 2>&1); then
@@ -77,6 +88,12 @@ capture() {
 cleanup() {
   if [[ -n "${APP_PID:-}" ]] && kill -0 "$APP_PID" 2>/dev/null; then
     kill "$APP_PID" 2>/dev/null || true
+    # Wait briefly, then force-kill if still alive
+    for _ in 1 2 3 4 5; do
+      kill -0 "$APP_PID" 2>/dev/null || return 0
+      sleep 0.2
+    done
+    kill -9 "$APP_PID" 2>/dev/null || true
     wait "$APP_PID" 2>/dev/null || true
   fi
 }
@@ -127,18 +144,18 @@ capture "$WID" "$OUTPUT_DIR/table.png"
 
 # 2) Search — open with Cmd+F, type filter text
 echo "==> Capturing search view..."
-send_keys 'keystroke "f" using command down'
+send_keys "$APP_PID" 'keystroke "f" using command down'
 sleep "$WAIT_SHORT"
-send_keys 'keystroke "Tech"'
+send_keys "$APP_PID" 'keystroke "Tech"'
 sleep "$WAIT_ACTION"
 capture "$WID" "$OUTPUT_DIR/search.png"
 # close search before chart capture
-send_keys 'key code 53' # Escape
+send_keys "$APP_PID" 'key code 53' # Escape
 sleep "$WAIT_SHORT"
 
 # 3) Chart — open with Cmd+G
 echo "==> Capturing chart view..."
-send_keys 'keystroke "g" using command down'
+send_keys "$APP_PID" 'keystroke "g" using command down'
 sleep "$WAIT_ACTION"
 capture "$WID" "$OUTPUT_DIR/chart.png"
 

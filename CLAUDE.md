@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## プロジェクト概要
 
-csvr — CLI から起動する CSV ビューワー。GPUI（Zed の UI フレームワーク）で構築。macOS 専用。
+csvr — CLI から起動する読み取り専用の CSV ビューワー。GPUI（Zed の UI フレームワーク）で構築。macOS 専用。編集・保存機能はスコープ外。
 
 ## 開発コマンド
 

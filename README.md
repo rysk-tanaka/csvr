@@ -79,7 +79,7 @@ cargo clippy             # lint
 
 | クレート | 用途 |
 | --- | --- |
-| [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui) | UI フレームワーク（Zed） |
+| [gpui](https://github.com/zed-industries/zed/tree/main/crates/gpui) | UI フレームワーク |
 | [csv](https://crates.io/crates/csv) | CSV パース |
 
 ---

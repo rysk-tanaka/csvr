@@ -15,8 +15,14 @@ if [[ "$(uname)" != "Darwin" ]]; then
   exit 1
 fi
 
-# Validate wait-time variables are numeric
-for var_name in WAIT_LAUNCH WAIT_ACTION WAIT_SHORT; do
+# Validate wait-time variables
+# WAIT_LAUNCH must be an integer (used in arithmetic expansion)
+if ! [[ "$WAIT_LAUNCH" =~ ^[0-9]+$ ]]; then
+  echo "error: WAIT_LAUNCH must be a positive integer, got '$WAIT_LAUNCH'" >&2
+  exit 1
+fi
+# WAIT_ACTION and WAIT_SHORT may be decimals (passed to sleep)
+for var_name in WAIT_ACTION WAIT_SHORT; do
   val="${!var_name}"
   if ! [[ "$val" =~ ^[0-9]+\.?[0-9]*$ ]]; then
     echo "error: $var_name must be a non-negative number, got '$val'" >&2
@@ -128,6 +134,10 @@ while :; do
     exit 1
   }
   if [[ -n "$WID" ]]; then
+    if ! [[ "$WID" =~ ^[0-9]+$ ]]; then
+      echo "error: get_window_id returned non-numeric value: '$WID'" >&2
+      exit 1
+    fi
     break
   fi
   if (( $(date +%s) >= deadline )); then

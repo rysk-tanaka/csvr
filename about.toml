@@ -19,6 +19,7 @@ ignore-dev-dependencies = true
 
 # cargo-about fails to parse self_cell's "Apache-2.0 OR GPL-2.0-only" (reports deprecated "GPL-2.0").
 # csvr selects Apache-2.0 from the dual license.
+# NOTE: update checksum below when self_cell version changes.
 [self_cell.clarify]
 license = "Apache-2.0"
 

@@ -11,8 +11,9 @@ use crate::chart::{
     CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart,
 };
 use crate::compute::{
-    compute_column_widths, compute_numeric_columns, compute_histogram_bins, downsample,
-    extract_column_values, extract_scatter_pairs, filter_rows, row_number_col_width, sort_indices,
+    compute_column_stats, compute_column_widths, compute_numeric_columns, compute_histogram_bins,
+    downsample, extract_column_values, extract_scatter_pairs, filter_rows, row_number_col_width,
+    sort_indices,
 };
 use crate::data::{
     CHART_TYPES, ChartData, ChartType, CsvData, SortDirection,
@@ -33,6 +34,7 @@ const SURFACE1: u32 = 0x45475a;
 const ROW_HOVER_BG: u32 = 0x27273a; // Between Base and Surface0 — hover
 const ROW_SELECTED_BG: u32 = 0x313244; // Surface0 — selected row
 const CELL_SELECTED_BG: u32 = 0x45475a; // Surface1 — selected cell
+const STATUS_BG: u32 = 0x181825; // Mantle — status bar background
 
 #[derive(IntoElement)]
 struct TableRow {
@@ -822,5 +824,57 @@ impl Render for CsvrApp {
                     .track_scroll(self.scroll_handle.clone())
                 }),
             )
+            // Status bar
+            .child({
+                let stats_text: Option<String> = self.selected_cell.and_then(|(_, col)| {
+                    let col = col?;
+                    if !self.numeric_columns.get(col).copied().unwrap_or(false) {
+                        return None;
+                    }
+                    let stats = compute_column_stats(
+                        &self.rows,
+                        &self.filtered_indices,
+                        col,
+                    )?;
+                    Some(format!(
+                        "Count: {}  Sum: {}  Min: {}  Max: {}  Mean: {}",
+                        stats.count,
+                        format_stat(stats.sum),
+                        format_stat(stats.min),
+                        format_stat(stats.max),
+                        format_stat(stats.mean),
+                    ))
+                });
+
+                div()
+                    .w_full()
+                    .px_2()
+                    .py_0p5()
+                    .bg(rgb(STATUS_BG))
+                    .border_t_1()
+                    .border_color(rgb(BORDER_COLOR))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .justify_between()
+                    .text_xs()
+                    .text_color(rgb(TEXT_SUBTEXT))
+                    .child(
+                        div().child(format!("{} / {} rows", filtered_count, total_count)),
+                    )
+                    .when_some(stats_text, |el, text| {
+                        el.child(
+                            div().text_color(rgb(TEXT_MAIN)).child(text),
+                        )
+                    })
+            })
+    }
+}
+
+fn format_stat(value: f64) -> String {
+    if value.fract() == 0.0 && value.abs() < 1e15 {
+        format!("{}", value as i64)
+    } else {
+        format!("{:.4}", value)
     }
 }

@@ -44,7 +44,7 @@ src/
 ```
 
 1. **データ層** (`data.rs`) — `CsvData` が CSV パースを担当。`csv` クレートで `std::io::Read` から読み込み、ヘッダーと行データを `Vec<String>` で保持。`ChartType`, `SortDirection`, `ChartData` の型定義
-2. **計算層** (`compute.rs`) — テスト可能な純粋関数群。列幅算出、行フィルタリング、数値列判定、ソート、チャート用データ抽出・ダウンサンプリング・ヒストグラムビン計算など
+2. **計算層** (`compute.rs`) — テスト可能な純粋関数群。列幅算出、行フィルタリング、数値列判定、ソート、チャート用データ抽出・ダウンサンプリング・ヒストグラムビン計算・列統計（`ColumnStats`）など
 3. **チャート描画** (`chart.rs`) — `draw_chart` 関数。GPUI の `canvas` 要素の paint コールバックから呼ばれる
 4. **UI 層** (`app.rs`) — `CsvrApp`（`Render` トレイト実装）がメインビュー。`TableRow`（`RenderOnce` / `IntoElement`）が個別行。本体は `uniform_list` による仮想スクロール
 
@@ -66,6 +66,12 @@ src/
 - `set_chart_type(ct)` — チャートタイプ変更（Bar / Line / Scatter / Histogram）
 - `set_chart_col(col)` / `set_chart_x_col(col)` — チャート対象列の変更（数値列のみ）+ `recompute_chart_data`
 - `recompute_chart_data()` — `chart_data_cache` を再計算。`toggle_chart`、`set_chart_type`、`set_chart_col`、`set_chart_x_col`、`recompute_filtered_indices` から呼ばれる
+
+### ステータスバーの設計判断
+
+- **統計はレンダリング時に計算** — `compute_column_stats` をセル選択中かつ数値列の場合のみ `render()` 内で呼び出す。チャートのようなキャッシュは不要（選択列が変わるたびに再描画されるため）
+- **`extract_column_values` を再利用** — 統計計算は既存のフィルタ済み数値抽出関数を活用し、count/sum/min/max/mean を算出
+- **表示フォーマット** — 整数値は小数点なし、それ以外は小数4桁。`format_stat()` ヘルパーで統一
 
 ### ソートの設計判断
 

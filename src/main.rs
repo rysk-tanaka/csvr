@@ -8,7 +8,7 @@ use std::io::IsTerminal;
 
 use gpui::{App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 
-use crate::app::{CsvrApp, DismissSearch, ToggleChart, ToggleSearch};
+use crate::app::{CopySelection, CsvrApp, DismissSearch, ToggleChart, ToggleSearch};
 use crate::data::CsvData;
 
 fn print_usage_and_exit(msg: &str) -> ! {
@@ -56,6 +56,7 @@ fn main() {
             KeyBinding::new("cmd-f", ToggleSearch, Some("CsvrApp")),
             KeyBinding::new("escape", DismissSearch, Some("CsvrApp")),
             KeyBinding::new("cmd-g", ToggleChart, Some("CsvrApp")),
+            KeyBinding::new("cmd-c", CopySelection, Some("CsvrApp")),
         ]);
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(

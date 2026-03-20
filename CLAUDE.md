@@ -57,7 +57,11 @@ src/
 - `set_search_query()` — クエリ変更 + `filtered_indices` 再計算 + スクロール先頭リセット
 - `toggle_search()` / `close_search()` — 検索状態の切り替え。`close_search` はクエリクリアを含む
 - `toggle_sort(col)` — ソート状態サイクル（None → Asc → Desc → None）+ `recompute_filtered_indices` + スクロール先頭リセット
-- `recompute_filtered_indices()` — フィルタ → ソートを一貫適用。`set_search_query` と `toggle_sort` から呼ばれる
+- `recompute_filtered_indices()` — フィルタ → ソートを一貫適用 + 選択クリア。`set_search_query` と `toggle_sort` から呼ばれる
+- `select_cell(filtered_idx, col)` — セル選択。`col=None` で行全体選択
+- `clear_selection()` — 選択解除（Escape で呼ばれる）
+- `move_selection(row_delta, col_delta)` — 矢印キーによるカーソル移動 + `ensure_visible` で自動スクロール
+- `copy_selection(cx)` — 選択中のセル値（またはタブ区切り行）をクリップボードにコピー（`Cmd+C`）
 - `toggle_chart()` — チャートパネルの表示/非表示切替（`Cmd+G`）
 - `set_chart_type(ct)` — チャートタイプ変更（Bar / Line / Scatter / Histogram）
 - `set_chart_col(col)` / `set_chart_x_col(col)` — チャート対象列の変更（数値列のみ）+ `recompute_chart_data`
@@ -75,6 +79,12 @@ src/
 - **ダウンサンプリング** — Bar: 100点、Line/Scatter: 500点に均等間引きで制限。大量データ時のパフォーマンスを確保
 - **Scatter の X/Y マッチング** — `extract_scatter_pairs` で1回のイテレーションで両列を同時に抽出。両方の列に有効な数値がある行のみプロット
 - **ゼロ除算防止** — Bar/Line/Scatter では全値同一（range == 0）の場合 range を 1.0 にフォールバック。Histogram では全値を中央ビンに配置
+
+### セル選択の設計判断
+
+- **選択インデックスは `filtered_indices` ベース** — 表示上の位置と一致させることで矢印キー移動が直感的に動作。フィルタ/ソート変更時に `recompute_filtered_indices` で選択をクリアし不整合を防ぐ
+- **行コピーはタブ区切り** — スプレッドシートへの貼り付け互換性が最も高い
+- **`TableRow` に `Entity<CsvrApp>` を保持** — クリックハンドラから親の状態を更新するため。`Entity` は参照カウントされたハンドルなので clone コストは低い
 
 ## GPUI API（v0.188.6）
 

@@ -13,20 +13,22 @@ WAIT_SHORT=0.5
 # --- helpers ---
 
 get_window_id() {
+  local pid="$1"
   local output
-  if ! output=$(swift -e '
+  if ! output=$(swift -e "
 import CoreGraphics
+let targetPID = Int32($pid)
 if let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] {
     for w in list {
-        if (w["kCGWindowOwnerName"] as? String) == "csvr" {
-            if let wid = w["kCGWindowNumber"] as? Int {
+        if let ownerPID = w[\"kCGWindowOwnerPID\"] as? Int32, ownerPID == targetPID {
+            if let wid = w[\"kCGWindowNumber\"] as? Int {
                 print(wid)
             }
             break
         }
     }
 }
-' 2>&1); then
+" 2>&1); then
     echo "error: swift failed. Is Xcode installed?" >&2
     echo "  output: $output" >&2
     return 1
@@ -86,18 +88,25 @@ mkdir -p "$OUTPUT_DIR"
 echo "==> Launching csvr..."
 "$BINARY" "$SAMPLE_CSV" &
 APP_PID=$!
-sleep "$WAIT_LAUNCH"
 
-if ! kill -0 "$APP_PID" 2>/dev/null; then
-  echo "error: csvr (PID $APP_PID) crashed during launch" >&2
-  exit 1
-fi
-
-WID=$(get_window_id)
-if [[ -z "$WID" ]]; then
-  echo "error: csvr window not found after ${WAIT_LAUNCH}s" >&2
-  exit 1
-fi
+# Poll until the window appears or timeout
+deadline=$(( $(date +%s) + WAIT_LAUNCH ))
+WID=""
+while :; do
+  if ! kill -0 "$APP_PID" 2>/dev/null; then
+    echo "error: csvr (PID $APP_PID) crashed during launch" >&2
+    exit 1
+  fi
+  WID=$(get_window_id "$APP_PID" || true)
+  if [[ -n "$WID" ]]; then
+    break
+  fi
+  if (( $(date +%s) >= deadline )); then
+    echo "error: csvr window not found within ${WAIT_LAUNCH}s" >&2
+    exit 1
+  fi
+  sleep "$WAIT_SHORT"
+done
 echo "  window id: $WID"
 
 # 1) Table view

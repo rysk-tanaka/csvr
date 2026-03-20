@@ -167,20 +167,34 @@ pub(crate) struct ColumnStats {
 }
 
 /// Compute summary statistics for a numeric column over the given row indices.
+/// Single-pass: parses each value once and accumulates count/sum/min/max.
 /// Returns `None` if no finite numeric values exist.
 pub(crate) fn compute_column_stats(
     rows: &[Rc<Vec<String>>],
     indices: &[usize],
     col: usize,
 ) -> Option<ColumnStats> {
-    let values = extract_column_values(rows, indices, col);
-    if values.is_empty() {
+    let mut count: usize = 0;
+    let mut sum: f64 = 0.0;
+    let mut min: f64 = f64::INFINITY;
+    let mut max: f64 = f64::NEG_INFINITY;
+
+    for &row_idx in indices {
+        let v = rows.get(row_idx)
+            .and_then(|row| row.get(col))
+            .and_then(|cell| cell.parse::<f64>().ok())
+            .filter(|v| v.is_finite());
+        if let Some(v) = v {
+            count += 1;
+            sum += v;
+            if v < min { min = v; }
+            if v > max { max = v; }
+        }
+    }
+
+    if count == 0 {
         return None;
     }
-    let count = values.len();
-    let sum: f64 = values.iter().map(|(_, v)| v).sum();
-    let min = values.iter().map(|(_, v)| *v).fold(f64::INFINITY, f64::min);
-    let max = values.iter().map(|(_, v)| *v).fold(f64::NEG_INFINITY, f64::max);
     let mean = sum / count as f64;
     Some(ColumnStats { count, sum, min, max, mean })
 }

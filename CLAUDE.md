@@ -69,9 +69,9 @@ src/
 
 ### ステータスバーの設計判断
 
-- **統計はレンダリング時に計算** — `compute_column_stats` をセル選択中かつ数値列の場合のみ `render()` 内で呼び出す。チャートのようなキャッシュは不要（選択列が変わるたびに再描画されるため）
-- **`extract_column_values` を再利用** — 統計計算は既存のフィルタ済み数値抽出関数を活用し、count/sum/min/max/mean を算出
-- **表示フォーマット** — 整数値は小数点なし、それ以外は小数4桁。`format_stat()` ヘルパーで統一
+- **統計は `column_stats_cache` にキャッシュ** — `chart_data_cache` と同様のパターン。`select_cell` / `recompute_filtered_indices` 時にのみ `recompute_column_stats()` で再計算。`render()` ではキャッシュを参照するだけ（ホバーやリサイズによる再描画で O(n) 計算が走るのを防ぐ）
+- **単一パスで統計計算** — `compute_column_stats` は `extract_column_values` の中間 Vec を介さず、直接 indices をイテレートして count/sum/min/max を一度に算出
+- **表示フォーマット** — 整数値は小数点なし、それ以外は小数4桁。`format_stat()` ヘルパーで統一。閾値は f64 仮数部の精度限界（2^53 ≈ 9.0e15）
 
 ### ソートの設計判断
 

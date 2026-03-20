@@ -346,6 +346,7 @@ impl CsvrApp {
             None => {
                 let initial_col = if col_count > 0 { Some(0) } else { None };
                 self.selected_cell = Some((0, initial_col));
+                self.recompute_column_stats();
                 self.ensure_visible(0);
                 return;
             }
@@ -367,7 +368,11 @@ impl CsvrApp {
             }
         };
 
+        let col_changed = col != new_col;
         self.selected_cell = Some((new_row, new_col));
+        if col_changed {
+            self.recompute_column_stats();
+        }
         self.ensure_visible(new_row);
     }
 

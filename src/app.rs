@@ -308,7 +308,11 @@ impl CsvrApp {
     }
 
     fn select_cell(&mut self, filtered_idx: usize, col: Option<usize>) {
-        let clamped = filtered_idx.min(self.filtered_indices.len().saturating_sub(1));
+        if self.filtered_indices.is_empty() {
+            self.clear_selection();
+            return;
+        }
+        let clamped = filtered_idx.min(self.filtered_indices.len() - 1);
         self.selected_cell = Some((clamped, col));
     }
 

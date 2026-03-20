@@ -4,8 +4,16 @@
 [![test](https://github.com/rysk-tanaka/csvr/actions/workflows/test.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/test.yml)
 [![build](https://github.com/rysk-tanaka/csvr/actions/workflows/build.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/build.yml)
 [![GPUI](https://img.shields.io/badge/GPUI-v0.188.6-blue)](https://github.com/zed-industries/zed/tree/main/crates/gpui)
+[![license](https://badgers.space/github/license/rysk-tanaka/csvr?corner_radius=5)](./LICENSE)
 
-> CLI から起動する CSV ビューワー。[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) で構築。
+> CLI から起動する CSV ビューワー
+
+---
+
+## 概要
+
+csvr はターミナルから CSV ファイルを指定して GUI ウィンドウでテーブル表示するツールです。
+[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) で構築しています。
 
 - ファイル指定（`csvr data.csv`）またはパイプ入力（`cat data.csv | csvr`）に対応
 - 大規模 CSV（数万〜数十万行）でも仮想スクロールで高速に表示
@@ -78,4 +86,6 @@ cargo clippy             # lint
 
 ## ライセンス
 
-MIT
+MIT License — © Ryosuke Tanaka
+
+サードパーティのライセンス情報は [THIRD_PARTY_LICENSES.html](./THIRD_PARTY_LICENSES.html) を参照してください。

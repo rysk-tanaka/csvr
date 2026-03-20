@@ -16,6 +16,7 @@ cargo test test_name         # 単一テスト実行
 cargo clippy                 # lint
 cargo build --release        # リリースビルド
 cargo tarpaulin --skip-clean --out stdout  # カバレッジ計測
+cargo update-licenses                # THIRD_PARTY_LICENSES.html 再生成（要: cargo-about）
 ./scripts/screenshot.sh              # README用スクリーンショット撮影（要: Accessibility許可 / 表示環境）
 ```
 

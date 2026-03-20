@@ -2,11 +2,38 @@ use std::{io::BufReader, io::IsTerminal, ops::Range, rc::Rc};
 
 use gpui::{
     App, Application, Bounds, Context, Focusable, FocusHandle, KeyBinding, KeyDownEvent,
-    ListHorizontalSizingBehavior, Render, SharedString, UniformListScrollHandle, Window,
-    WindowBounds, WindowOptions, actions, div, prelude::*, px, rgb, size, uniform_list,
+    ListHorizontalSizingBehavior, PathBuilder, Render, SharedString, UniformListScrollHandle,
+    Window, WindowBounds, WindowOptions, actions, canvas, div, fill, point, prelude::*, px, rgb,
+    size, uniform_list,
 };
 
-actions!(csvr, [ToggleSearch, DismissSearch]);
+actions!(csvr, [ToggleSearch, DismissSearch, ToggleChart]);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ChartType {
+    Bar,
+    Line,
+    Scatter,
+    Histogram,
+}
+
+const CHART_TYPES: [ChartType; 4] = [
+    ChartType::Bar,
+    ChartType::Line,
+    ChartType::Scatter,
+    ChartType::Histogram,
+];
+
+impl ChartType {
+    fn label(self) -> &'static str {
+        match self {
+            ChartType::Bar => "Bar",
+            ChartType::Line => "Line",
+            ChartType::Scatter => "Scatter",
+            ChartType::Histogram => "Histogram",
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SortDirection {
@@ -124,6 +151,89 @@ fn sort_indices(
     }
 }
 
+/// Extract finite numeric values from a specific column for the given row indices.
+/// Non-numeric, NaN, Infinity, and missing values are skipped.
+fn extract_column_values(
+    rows: &[Rc<Vec<String>>],
+    indices: &[usize],
+    col: usize,
+) -> Vec<(usize, f64)> {
+    indices
+        .iter()
+        .filter_map(|&i| {
+            let val = rows.get(i)?.get(col)?.as_str();
+            val.parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .map(|v| (i, v))
+        })
+        .collect()
+}
+
+/// Downsample a slice to at most `max` points using uniform stride selection.
+/// When `max >= 2`, first and last elements are always included to preserve data range boundaries.
+/// Returns empty when `max` is 0.
+fn downsample<T: Copy>(values: &[T], max: usize) -> Vec<T> {
+    if max == 0 {
+        return Vec::new();
+    }
+    if values.len() <= max {
+        return values.to_vec();
+    }
+    if max == 1 {
+        return vec![values[0]];
+    }
+    // Linearly interpolate indices so that first and last are always included
+    let last = values.len() - 1;
+    (0..max)
+        .map(|i| {
+            let idx = (i as f64 * last as f64 / (max - 1) as f64).round() as usize;
+            values[idx]
+        })
+        .collect()
+}
+
+/// Extract paired finite numeric values from two columns for the given row indices.
+/// Only rows where both columns have a valid finite number are included.
+fn extract_scatter_pairs(
+    rows: &[Rc<Vec<String>>],
+    indices: &[usize],
+    x_col: usize,
+    y_col: usize,
+) -> Vec<(f64, f64)> {
+    indices
+        .iter()
+        .filter_map(|&i| {
+            let row = rows.get(i)?;
+            let x = row.get(x_col)?.parse::<f64>().ok().filter(|v| v.is_finite())?;
+            let y = row.get(y_col)?.parse::<f64>().ok().filter(|v| v.is_finite())?;
+            Some((x, y))
+        })
+        .collect()
+}
+
+/// Compute histogram bin counts for the given values.
+fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<usize> {
+    if values.is_empty() || bin_count == 0 {
+        return vec![0; bin_count];
+    }
+    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let range = max - min;
+    if range.abs() < f64::EPSILON {
+        // All values identical — put everything in the middle bin
+        let mut bins = vec![0; bin_count];
+        bins[bin_count / 2] = values.len();
+        return bins;
+    }
+    let mut bins = vec![0; bin_count];
+    for &v in values {
+        let idx = ((v - min) / range * bin_count as f64) as usize;
+        bins[idx.min(bin_count - 1)] += 1;
+    }
+    bins
+}
+
 // Catppuccin Mocha palette
 const BG_BASE: u32 = 0x1e1e2e;
 const TEXT_MAIN: u32 = 0xcdd6f4;
@@ -133,6 +243,12 @@ const HEADER_BG: u32 = 0x181825;
 const ROW_ALT_BG: u32 = 0x1e1e2e; // Base
 const ROW_EVEN_BG: u32 = 0x11111b; // Crust (darker for contrast)
 const SEARCH_BG: u32 = 0x313244; // Surface0
+const CHART_BLUE: u32 = 0x89b4fa;
+const CHART_GREEN: u32 = 0xa6e3a1;
+const CHART_PEACH: u32 = 0xfab387;
+const CHART_MAUVE: u32 = 0xcba6f7;
+const SURFACE1: u32 = 0x45475a;
+const CHART_CANVAS_HEIGHT: f32 = 280.0;
 
 #[derive(IntoElement)]
 struct TableRow {
@@ -202,6 +318,11 @@ struct CsvrApp {
     search_query: String,
     filtered_indices: Vec<usize>,
     sort_state: Option<(usize, SortDirection)>,
+    chart_active: bool,
+    chart_type: ChartType,
+    chart_col: usize,
+    chart_x_col: usize,
+    chart_data_cache: Option<ChartData>,
     focus_handle: FocusHandle,
 }
 
@@ -229,6 +350,14 @@ impl CsvrApp {
             .collect();
         let total_rows = data.rows.len();
         let rows = data.rows.into_iter().map(Rc::new).collect();
+        // Find first two numeric columns for chart defaults
+        let first_numeric = numeric_columns.iter().position(|&b| b).unwrap_or(0);
+        let second_numeric = numeric_columns
+            .iter()
+            .skip(first_numeric + 1)
+            .position(|&b| b)
+            .map(|i| i + first_numeric + 1)
+            .unwrap_or(first_numeric);
         Self {
             headers,
             rows,
@@ -241,6 +370,11 @@ impl CsvrApp {
             search_query: String::new(),
             filtered_indices: (0..total_rows).collect(),
             sort_state: None,
+            chart_active: false,
+            chart_type: ChartType::Bar,
+            chart_col: first_numeric,
+            chart_x_col: second_numeric,
+            chart_data_cache: None,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -251,6 +385,9 @@ impl CsvrApp {
             let use_numeric = self.numeric_columns.get(col).copied().unwrap_or(false);
             self.filtered_indices =
                 sort_indices(&self.rows, &self.filtered_indices, col, use_numeric, direction);
+        }
+        if self.chart_active {
+            self.recompute_chart_data();
         }
     }
 
@@ -286,6 +423,215 @@ impl CsvrApp {
         self.search_active = false;
         self.set_search_query(String::new());
     }
+
+    fn toggle_chart(&mut self) {
+        self.chart_active = !self.chart_active;
+        if self.chart_active {
+            self.recompute_chart_data();
+        }
+    }
+
+    fn set_chart_type(&mut self, ct: ChartType) {
+        self.chart_type = ct;
+        self.recompute_chart_data();
+    }
+
+    fn set_chart_col(&mut self, col: usize) {
+        if self.numeric_columns.get(col).copied().unwrap_or(false) {
+            self.chart_col = col;
+            self.recompute_chart_data();
+        }
+    }
+
+    fn set_chart_x_col(&mut self, col: usize) {
+        if self.numeric_columns.get(col).copied().unwrap_or(false) {
+            self.chart_x_col = col;
+            self.recompute_chart_data();
+        }
+    }
+
+    fn recompute_chart_data(&mut self) {
+        if !self.chart_active || self.filtered_indices.is_empty() {
+            self.chart_data_cache = None;
+            return;
+        }
+        let has_numeric = self.numeric_columns.iter().any(|&b| b);
+        if !has_numeric {
+            self.chart_data_cache = None;
+            return;
+        }
+        let y_values = extract_column_values(&self.rows, &self.filtered_indices, self.chart_col);
+        self.chart_data_cache = Some(match self.chart_type {
+            ChartType::Bar => {
+                let sampled = downsample(&y_values, 100);
+                ChartData::Points(sampled.into_iter().map(|(_, v)| v).collect())
+            }
+            ChartType::Line => {
+                let sampled = downsample(&y_values, 500);
+                ChartData::Points(sampled.into_iter().map(|(_, v)| v).collect())
+            }
+            ChartType::Histogram => {
+                let vals: Vec<f64> = y_values.iter().map(|(_, v)| *v).collect();
+                let bins = compute_histogram_bins(&vals, 30);
+                ChartData::Bins(bins)
+            }
+            ChartType::Scatter => {
+                let pairs = extract_scatter_pairs(&self.rows, &self.filtered_indices, self.chart_x_col, self.chart_col);
+                let limited = downsample(&pairs, 500);
+                ChartData::Pairs(limited)
+            }
+        });
+    }
+
+    fn numeric_col_indices(&self) -> Vec<usize> {
+        self.numeric_columns
+            .iter()
+            .enumerate()
+            .filter(|(_, is_num)| **is_num)
+            .map(|(i, _)| i)
+            .collect()
+    }
+}
+
+#[derive(Clone)]
+enum ChartData {
+    Points(Vec<f64>),
+    Bins(Vec<usize>),
+    Pairs(Vec<(f64, f64)>),
+}
+
+fn draw_chart(
+    window: &mut Window,
+    bounds: Bounds<gpui::Pixels>,
+    data: &ChartData,
+    chart_type: ChartType,
+) {
+    let padding = 16.0;
+    let x0 = bounds.origin.x.0 + padding;
+    let y0 = bounds.origin.y.0 + padding;
+    let w = bounds.size.width.0 - padding * 2.0;
+    let h = bounds.size.height.0 - padding * 2.0;
+    if w <= 0.0 || h <= 0.0 {
+        return;
+    }
+
+    match (chart_type, data) {
+        (ChartType::Bar, ChartData::Points(vals)) | (ChartType::Line, ChartData::Points(vals))
+            if vals.is_empty() => {}
+
+        (ChartType::Bar, ChartData::Points(vals)) => {
+            let min = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let base_min = min.min(0.0);
+            let effective_range = max - base_min;
+            let effective_range = if effective_range.abs() < f64::EPSILON { 1.0 } else { effective_range };
+
+            let n = vals.len();
+            let gap = 1.0_f32;
+            let bar_w = ((w - gap * (n as f32 - 1.0).max(0.0)) / n as f32).max(1.0);
+
+            for (i, &val) in vals.iter().enumerate() {
+                let normalized = (val - base_min) / effective_range;
+                let bar_h = (normalized as f32 * h).max(1.0);
+                let bx = x0 + i as f32 * (bar_w + gap);
+                let by = y0 + h - bar_h;
+                let rect = Bounds::new(point(px(bx), px(by)), size(px(bar_w), px(bar_h)));
+                window.paint_quad(fill(rect, rgb(CHART_BLUE)));
+            }
+        }
+
+        (ChartType::Line, ChartData::Points(vals)) => {
+            let min = vals.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let range = if (max - min).abs() < f64::EPSILON { 1.0 } else { max - min };
+
+            let n = vals.len();
+            let points: Vec<(f32, f32)> = vals
+                .iter()
+                .enumerate()
+                .map(|(i, &v)| {
+                    let px_x = if n > 1 { x0 + i as f32 * w / (n - 1) as f32 } else { x0 + w / 2.0 };
+                    let normalized = (v - min) / range;
+                    let px_y = y0 + h - normalized as f32 * h;
+                    (px_x, px_y)
+                })
+                .collect();
+
+            // Draw line
+            if points.len() >= 2 {
+                let mut path = PathBuilder::stroke(px(2.0));
+                path.move_to(point(px(points[0].0), px(points[0].1)));
+                for &(px_x, px_y) in &points[1..] {
+                    path.line_to(point(px(px_x), px(px_y)));
+                }
+                match path.build() {
+                    Ok(path) => window.paint_path(path, rgb(CHART_GREEN)),
+                    Err(e) => {
+                        if cfg!(debug_assertions) {
+                            eprintln!("Warning: failed to build line chart path: {e:?}");
+                        }
+                    }
+                }
+            }
+
+            // Draw dots
+            let dot_r = 2.5_f32;
+            for &(px_x, px_y) in &points {
+                let dot = Bounds::new(
+                    point(px(px_x - dot_r), px(px_y - dot_r)),
+                    size(px(dot_r * 2.0), px(dot_r * 2.0)),
+                );
+                window.paint_quad(fill(dot, rgb(CHART_GREEN)).corner_radii(px(dot_r)));
+            }
+        }
+
+        (ChartType::Histogram, ChartData::Bins(bins)) => {
+            let max_count = bins.iter().copied().max().unwrap_or(1).max(1);
+            let n = bins.len();
+            let gap = 1.0_f32;
+            let bar_w = ((w - gap * (n as f32 - 1.0).max(0.0)) / n as f32).max(1.0);
+
+            for (i, &count) in bins.iter().enumerate() {
+                let bar_h = (count as f32 / max_count as f32 * h).max(if count > 0 { 1.0 } else { 0.0 });
+                let bx = x0 + i as f32 * (bar_w + gap);
+                let by = y0 + h - bar_h;
+                let rect = Bounds::new(point(px(bx), px(by)), size(px(bar_w), px(bar_h)));
+                window.paint_quad(fill(rect, rgb(CHART_MAUVE)));
+            }
+        }
+
+        (ChartType::Scatter, ChartData::Pairs(pairs)) if pairs.is_empty() => {}
+
+        (ChartType::Scatter, ChartData::Pairs(pairs)) => {
+            let x_min = pairs.iter().map(|p| p.0).fold(f64::INFINITY, f64::min);
+            let x_max = pairs.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
+            let y_min = pairs.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
+            let y_max = pairs.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
+            let x_range = if (x_max - x_min).abs() < f64::EPSILON { 1.0 } else { x_max - x_min };
+            let y_range = if (y_max - y_min).abs() < f64::EPSILON { 1.0 } else { y_max - y_min };
+
+            let dot_r = 3.0_f32;
+            for &(xv, yv) in pairs {
+                let px_x = x0 + ((xv - x_min) / x_range) as f32 * w;
+                let px_y = y0 + h - ((yv - y_min) / y_range) as f32 * h;
+                let dot = Bounds::new(
+                    point(px(px_x - dot_r), px(px_y - dot_r)),
+                    size(px(dot_r * 2.0), px(dot_r * 2.0)),
+                );
+                window.paint_quad(fill(dot, rgb(CHART_PEACH)).corner_radii(px(dot_r)));
+            }
+        }
+
+        (ChartType::Bar, ChartData::Bins(_) | ChartData::Pairs(_))
+        | (ChartType::Line, ChartData::Bins(_) | ChartData::Pairs(_))
+        | (ChartType::Histogram, ChartData::Points(_) | ChartData::Pairs(_))
+        | (ChartType::Scatter, ChartData::Points(_) | ChartData::Bins(_)) => {
+            debug_assert!(false, "Mismatched ChartType and ChartData");
+            if cfg!(debug_assertions) {
+                eprintln!("Bug: mismatched ChartType and ChartData variant");
+            }
+        }
+    }
 }
 
 impl Render for CsvrApp {
@@ -307,6 +653,10 @@ impl Render for CsvrApp {
                     this.close_search();
                     cx.notify();
                 }
+            }))
+            .on_action(cx.listener(|this, _: &ToggleChart, _window, cx| {
+                this.toggle_chart();
+                cx.notify();
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let keystroke = &event.keystroke;
@@ -469,6 +819,167 @@ impl Render for CsvrApp {
                                 .text_color(rgb(TEXT_SUBTEXT))
                                 .text_xs()
                                 .child(format!("{} / {} rows", filtered_count, total_count)),
+                        ),
+                )
+            })
+            // Chart panel
+            .when(self.chart_active, |el| {
+                let entity = entity.clone();
+                let numeric_cols = self.numeric_col_indices();
+                let has_numeric = !numeric_cols.is_empty();
+                let chart_type = self.chart_type;
+                let chart_col = self.chart_col;
+                let chart_x_col = self.chart_x_col;
+                let headers = &self.headers;
+
+                // Toolbar: chart type buttons + column selectors
+                let toolbar = div()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .bg(rgb(SEARCH_BG))
+                    .border_b_1()
+                    .border_color(rgb(BORDER_COLOR))
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .children(CHART_TYPES.iter().map(|&ct| {
+                        let entity = entity.clone();
+                        let is_active = ct == chart_type;
+                        div()
+                            .id(SharedString::from(format!("chart-type-{}", ct.label())))
+                            .px_2()
+                            .py_0p5()
+                            .rounded_md()
+                            .text_xs()
+                            .cursor_pointer()
+                            .when(is_active, |el| el.bg(rgb(SURFACE1)).text_color(rgb(CHART_BLUE)))
+                            .when(!is_active, |el| el.text_color(rgb(TEXT_SUBTEXT)))
+                            .on_click(move |_, _, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.set_chart_type(ct);
+                                    cx.notify();
+                                });
+                            })
+                            .child(ct.label())
+                    }))
+                    .child(div().w(px(1.0)).h(px(16.0)).bg(rgb(BORDER_COLOR)))
+                    .when(has_numeric, |el| {
+                        let is_scatter = chart_type == ChartType::Scatter;
+                        // Y column (or single column for non-scatter)
+                        let col_label: SharedString = if is_scatter {
+                            format!("Y: {}", headers.get(chart_col).map(|s| s.as_ref()).unwrap_or("?")).into()
+                        } else {
+                            headers.get(chart_col).cloned().unwrap_or_else(|| "?".into())
+                        };
+                        let entity2 = entity.clone();
+                        let numeric_cols2 = numeric_cols.clone();
+                        el.child(
+                            div()
+                                .id("chart-col-selector")
+                                .px_2()
+                                .py_0p5()
+                                .rounded_md()
+                                .text_xs()
+                                .cursor_pointer()
+                                .bg(rgb(SURFACE1))
+                                .text_color(rgb(CHART_GREEN))
+                                .on_click(move |_, _, cx| {
+                                    entity2.update(cx, |this, cx| {
+                                        // Cycle to next numeric column
+                                        let cur_pos = numeric_cols2.iter().position(|&c| c == this.chart_col).unwrap_or(0);
+                                        let next = (cur_pos + 1) % numeric_cols2.len();
+                                        this.set_chart_col(numeric_cols2[next]);
+                                        cx.notify();
+                                    });
+                                })
+                                .child(col_label),
+                        )
+                        .when(is_scatter, |el| {
+                            let x_label: SharedString = format!("X: {}", headers.get(chart_x_col).map(|s| s.as_ref()).unwrap_or("?")).into();
+                            let entity3 = entity.clone();
+                            let numeric_cols3 = numeric_cols.clone();
+                            el.child(
+                                div()
+                                    .id("chart-x-col-selector")
+                                    .px_2()
+                                    .py_0p5()
+                                    .rounded_md()
+                                    .text_xs()
+                                    .cursor_pointer()
+                                    .bg(rgb(SURFACE1))
+                                    .text_color(rgb(CHART_PEACH))
+                                    .on_click(move |_, _, cx| {
+                                        entity3.update(cx, |this, cx| {
+                                            let cur_pos = numeric_cols3.iter().position(|&c| c == this.chart_x_col).unwrap_or(0);
+                                            let next = (cur_pos + 1) % numeric_cols3.len();
+                                            this.set_chart_x_col(numeric_cols3[next]);
+                                            cx.notify();
+                                        });
+                                    })
+                                    .child(x_label),
+                            )
+                        })
+                    })
+                    .when(!has_numeric, |el| {
+                        el.child(
+                            div()
+                                .text_xs()
+                                .text_color(rgb(TEXT_SUBTEXT))
+                                .child("No numeric columns"),
+                        )
+                    });
+
+                // Add X==Y warning for Scatter when both columns are the same
+                let toolbar = toolbar.when(chart_type == ChartType::Scatter && chart_col == chart_x_col, |el| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(CHART_PEACH))
+                            .child("X = Y"),
+                    )
+                });
+
+                if !has_numeric || self.filtered_indices.is_empty() {
+                    let message = if !has_numeric { "No numeric columns" } else { "No data" };
+                    return el.child(toolbar).child(
+                        div()
+                            .w_full()
+                            .h(px(CHART_CANVAS_HEIGHT))
+                            .bg(rgb(HEADER_BG))
+                            .border_b_1()
+                            .border_color(rgb(BORDER_COLOR))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                div()
+                                    .text_color(rgb(TEXT_SUBTEXT))
+                                    .text_sm()
+                                    .child(message),
+                            ),
+                    );
+                }
+
+                // Use cached chart data (recomputed on state changes, not every render)
+                let chart_data = self.chart_data_cache.clone().unwrap_or(ChartData::Points(Vec::new()));
+
+                el.child(toolbar).child(
+                    div()
+                        .w_full()
+                        .h(px(CHART_CANVAS_HEIGHT))
+                        .bg(rgb(HEADER_BG))
+                        .border_b_1()
+                        .border_color(rgb(BORDER_COLOR))
+                        .child(
+                            canvas(
+                                move |bounds, _window, _cx| (bounds, chart_data, chart_type),
+                                move |_bounds, (bounds, data, ct), window, _cx| {
+                                    draw_chart(window, bounds, &data, ct);
+                                },
+                            )
+                            .size_full(),
                         ),
                 )
             })
@@ -845,6 +1356,255 @@ mod tests {
         let result = compute_numeric_columns(&data.rows, data.headers.len());
         assert_eq!(result, vec![false]);
     }
+
+    // --- extract_column_values ---
+
+    #[test]
+    fn extract_values_basic() {
+        let rows = make_rc_rows(&[&["10", "a"], &["20", "b"], &["30", "c"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2], 0);
+        assert_eq!(result, vec![(0, 10.0), (1, 20.0), (2, 30.0)]);
+    }
+
+    #[test]
+    fn extract_values_skips_non_numeric() {
+        let rows = make_rc_rows(&[&["10"], &["abc"], &["30"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2], 0);
+        assert_eq!(result, vec![(0, 10.0), (2, 30.0)]);
+    }
+
+    #[test]
+    fn extract_values_respects_indices() {
+        let rows = make_rc_rows(&[&["10"], &["20"], &["30"]]);
+        let result = extract_column_values(&rows, &[0, 2], 0);
+        assert_eq!(result, vec![(0, 10.0), (2, 30.0)]);
+    }
+
+    #[test]
+    fn extract_values_empty_indices() {
+        let rows = make_rc_rows(&[&["10"]]);
+        let result = extract_column_values(&rows, &[], 0);
+        assert!(result.is_empty());
+    }
+
+    // --- downsample ---
+
+    #[test]
+    fn downsample_no_reduction_needed() {
+        let values: Vec<(usize, f64)> = vec![(0, 1.0), (1, 2.0), (2, 3.0)];
+        let result = downsample(&values, 5);
+        assert_eq!(result, values);
+    }
+
+    #[test]
+    fn downsample_reduces_to_max() {
+        let values: Vec<(usize, f64)> = (0..100).map(|i| (i, i as f64)).collect();
+        let result = downsample(&values, 10);
+        assert_eq!(result.len(), 10);
+        assert_eq!(result[0], (0, 0.0));
+        assert_eq!(*result.last().unwrap(), (99, 99.0));
+    }
+
+    #[test]
+    fn downsample_includes_last_element() {
+        let values: Vec<(usize, f64)> = (0..101).map(|i| (i, i as f64)).collect();
+        let result = downsample(&values, 100);
+        assert_eq!(result.len(), 100);
+        assert_eq!(result[0], (0, 0.0));
+        assert_eq!(*result.last().unwrap(), (100, 100.0));
+    }
+
+    #[test]
+    fn downsample_empty() {
+        let result = downsample(&[] as &[(usize, f64)], 10);
+        assert!(result.is_empty());
+    }
+
+    // --- compute_histogram_bins ---
+
+    #[test]
+    fn histogram_basic() {
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let bins = compute_histogram_bins(&values, 5);
+        assert_eq!(bins.len(), 5);
+        let total: usize = bins.iter().sum();
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn histogram_all_same_value() {
+        let values = vec![5.0, 5.0, 5.0];
+        let bins = compute_histogram_bins(&values, 4);
+        assert_eq!(bins.len(), 4);
+        // All values go to the middle bin
+        assert_eq!(bins[2], 3);
+        assert_eq!(bins.iter().sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn histogram_empty_values() {
+        let bins = compute_histogram_bins(&[], 5);
+        assert_eq!(bins, vec![0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn histogram_single_value() {
+        let bins = compute_histogram_bins(&[42.0], 3);
+        assert_eq!(bins.iter().sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn histogram_max_value_in_last_bin() {
+        let bins = compute_histogram_bins(&[0.0, 5.0, 10.0], 5);
+        assert_eq!(bins.len(), 5);
+        assert_eq!(bins.iter().sum::<usize>(), 3);
+        // max value (10.0) should land in the last bin
+        assert!(bins[4] > 0);
+    }
+
+    #[test]
+    fn histogram_negative_values() {
+        let bins = compute_histogram_bins(&[-10.0, -5.0, 0.0, 5.0, 10.0], 5);
+        assert_eq!(bins.iter().sum::<usize>(), 5);
+    }
+
+    #[test]
+    fn histogram_zero_bins() {
+        let bins = compute_histogram_bins(&[1.0, 2.0], 0);
+        assert!(bins.is_empty());
+    }
+
+    // --- downsample edge cases ---
+
+    #[test]
+    fn downsample_max_zero_returns_empty() {
+        let values: Vec<(usize, f64)> = vec![(0, 1.0), (1, 2.0)];
+        let result = downsample(&values, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn downsample_max_one_returns_first() {
+        let values: Vec<(usize, f64)> = vec![(0, 1.0), (1, 2.0), (2, 3.0)];
+        let result = downsample(&values, 1);
+        assert_eq!(result, vec![(0, 1.0)]);
+    }
+
+    // --- extract_column_values edge cases ---
+
+    #[test]
+    fn extract_values_skips_nan_and_infinity() {
+        let rows = make_rc_rows(&[&["10"], &["NaN"], &["inf"], &["-inf"], &["30"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2, 3, 4], 0);
+        assert_eq!(result, vec![(0, 10.0), (4, 30.0)]);
+    }
+
+    #[test]
+    fn extract_values_out_of_bounds_index() {
+        let rows = make_rc_rows(&[&["10"], &["20"]]);
+        let result = extract_column_values(&rows, &[0, 5, 1], 0);
+        assert_eq!(result, vec![(0, 10.0), (1, 20.0)]);
+    }
+
+    #[test]
+    fn extract_values_out_of_bounds_col() {
+        let rows = make_rc_rows(&[&["10"], &["20"]]);
+        let result = extract_column_values(&rows, &[0, 1], 5);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_values_empty_string() {
+        let rows = make_rc_rows(&[&["10"], &[""], &["30"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2], 0);
+        assert_eq!(result, vec![(0, 10.0), (2, 30.0)]);
+    }
+
+    // --- downsample with (f64, f64) pairs ---
+
+    #[test]
+    fn downsample_pairs_no_reduction() {
+        let pairs = vec![(1.0, 2.0), (3.0, 4.0)];
+        let result = downsample(&pairs, 5);
+        assert_eq!(result, pairs);
+    }
+
+    #[test]
+    fn downsample_pairs_includes_last() {
+        let pairs: Vec<(f64, f64)> = (0..101).map(|i| (i as f64, i as f64 * 2.0)).collect();
+        let result = downsample(&pairs, 50);
+        assert_eq!(result.len(), 50);
+        assert_eq!(result[0], (0.0, 0.0));
+        assert_eq!(*result.last().unwrap(), (100.0, 200.0));
+    }
+
+    #[test]
+    fn downsample_pairs_max_zero() {
+        let pairs = vec![(1.0, 2.0)];
+        let result = downsample(&pairs, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn downsample_pairs_max_one() {
+        let pairs = vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)];
+        let result = downsample(&pairs, 1);
+        assert_eq!(result, vec![(1.0, 2.0)]);
+    }
+
+    #[test]
+    fn downsample_max_two_returns_first_and_last() {
+        let values: Vec<(usize, f64)> = (0..10).map(|i| (i, i as f64)).collect();
+        let result = downsample(&values, 2);
+        assert_eq!(result, vec![(0, 0.0), (9, 9.0)]);
+    }
+
+    #[test]
+    fn histogram_skewed_distribution() {
+        let values = vec![0.0, 0.1, 0.2, 100.0];
+        let bins = compute_histogram_bins(&values, 10);
+        // Most values should be in the first bin, only 100.0 in the last
+        assert!(bins[0] >= 3);
+        assert_eq!(*bins.last().unwrap(), 1);
+    }
+
+    #[test]
+    fn extract_values_negative_numbers() {
+        let rows = make_rc_rows(&[&["-3.14"], &["2.5"], &["-0.001"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2], 0);
+        assert_eq!(result, vec![(0, -3.14), (1, 2.5), (2, -0.001)]);
+    }
+
+    // --- extract_scatter_pairs ---
+
+    #[test]
+    fn scatter_pairs_basic() {
+        let rows = make_rc_rows(&[&["1", "10"], &["2", "20"], &["3", "30"]]);
+        let result = extract_scatter_pairs(&rows, &[0, 1, 2], 0, 1);
+        assert_eq!(result, vec![(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)]);
+    }
+
+    #[test]
+    fn scatter_pairs_skips_non_numeric_in_either_column() {
+        let rows = make_rc_rows(&[&["1", "10"], &["abc", "20"], &["3", "xyz"], &["4", "40"]]);
+        let result = extract_scatter_pairs(&rows, &[0, 1, 2, 3], 0, 1);
+        // Row 1 has non-numeric X, row 2 has non-numeric Y — both skipped
+        assert_eq!(result, vec![(1.0, 10.0), (4.0, 40.0)]);
+    }
+
+    #[test]
+    fn scatter_pairs_empty_indices() {
+        let rows = make_rc_rows(&[&["1", "10"]]);
+        let result = extract_scatter_pairs(&rows, &[], 0, 1);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn scatter_pairs_filters_nan_infinity() {
+        let rows = make_rc_rows(&[&["1", "NaN"], &["inf", "2"], &["3", "4"]]);
+        let result = extract_scatter_pairs(&rows, &[0, 1, 2], 0, 1);
+        assert_eq!(result, vec![(3.0, 4.0)]);
+    }
 }
 
 fn main() {
@@ -853,6 +1613,7 @@ fn main() {
         cx.bind_keys([
             KeyBinding::new("cmd-f", ToggleSearch, Some("CsvrApp")),
             KeyBinding::new("escape", DismissSearch, Some("CsvrApp")),
+            KeyBinding::new("cmd-g", ToggleChart, Some("CsvrApp")),
         ]);
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(

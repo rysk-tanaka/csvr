@@ -38,7 +38,7 @@ struct TableRow {
     cells: Rc<Vec<String>>,
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
-    min_row_width: f32,
+    min_row_width: gpui::Pixels,
 }
 
 impl RenderOnce for TableRow {
@@ -52,7 +52,7 @@ impl RenderOnce for TableRow {
         div()
             .flex()
             .flex_row()
-            .min_w(px(self.min_row_width))
+            .min_w(self.min_row_width)
             .border_b_1()
             .border_color(rgb(BORDER_COLOR))
             .bg(rgb(bg))
@@ -282,7 +282,7 @@ impl Render for CsvrApp {
         let h_offset = self.h_scroll_offset();
         let filtered_count = self.filtered_indices.len();
         let total_count = self.rows.len();
-        let viewport_width = window.viewport_size().width.0;
+        let viewport_width = window.viewport_size().width;
 
         div()
             .track_focus(&self.focus_handle(cx))

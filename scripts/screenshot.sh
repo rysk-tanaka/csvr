@@ -129,10 +129,7 @@ while :; do
     echo "error: csvr (PID $APP_PID) crashed during launch" >&2
     exit 1
   fi
-  WID=$(get_window_id "$APP_PID") || {
-    echo "error: failed to query window list (swift error)" >&2
-    exit 1
-  }
+  WID=$(get_window_id "$APP_PID") || exit 1
   if [[ -n "$WID" ]]; then
     if ! [[ "$WID" =~ ^[0-9]+$ ]]; then
       echo "error: get_window_id returned non-numeric value: '$WID'" >&2

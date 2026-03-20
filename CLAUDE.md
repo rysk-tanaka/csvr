@@ -85,6 +85,7 @@ src/
 - **選択インデックスは `filtered_indices` ベース** — 表示上の位置と一致させることで矢印キー移動が直感的に動作。フィルタ/ソート変更時に `recompute_filtered_indices` で選択をクリアし不整合を防ぐ
 - **行コピーはタブ区切り** — スプレッドシートへの貼り付け互換性が最も高い
 - **`TableRow` に `Entity<CsvrApp>` を保持** — クリックハンドラから親の状態を更新するため。`Entity` は参照カウントされたハンドルなので clone コストは低い
+- **ホバーは GPUI の `.hover()` スタイルで実装** — 状態管理不要。行 div に `.id()` を付与して `StatefulInteractiveElement` にし、`.hover(|style| style.bg(...))` で背景色を変更。選択中の行ではホバーを無効化
 
 ## GPUI API（v0.188.6）
 

@@ -30,6 +30,7 @@ const ROW_ALT_BG: u32 = 0x1e1e2e; // Base
 const ROW_EVEN_BG: u32 = 0x11111b; // Crust (darker for contrast)
 const SEARCH_BG: u32 = 0x313244; // Surface0
 const SURFACE1: u32 = 0x45475a;
+const ROW_HOVER_BG: u32 = 0x27273a; // Between Base and Surface0 — hover
 const ROW_SELECTED_BG: u32 = 0x313244; // Surface0 — selected row
 const CELL_SELECTED_BG: u32 = 0x45475a; // Surface1 — selected cell
 
@@ -62,12 +63,16 @@ impl RenderOnce for TableRow {
         let selected_col = self.selected_col;
 
         div()
+            .id(("row", ix))
             .flex()
             .flex_row()
             .min_w(self.min_row_width)
             .border_b_1()
             .border_color(rgb(BORDER_COLOR))
             .bg(rgb(bg))
+            .when(!is_row_selected, |el| {
+                el.hover(|style| style.bg(rgb(ROW_HOVER_BG)))
+            })
             .py_0p5()
             .child({
                 let entity = entity.clone();
@@ -79,9 +84,6 @@ impl RenderOnce for TableRow {
                     .text_color(rgb(TEXT_SUBTEXT))
                     .text_right()
                     .cursor_pointer()
-                    .when(matches!(selected_col, Some(None)), |el| {
-                        el.bg(rgb(CELL_SELECTED_BG))
-                    })
                     .on_click(move |_event, _window, cx| {
                         entity.update(cx, |this, cx| {
                             this.select_cell(ix, None);
@@ -111,7 +113,6 @@ impl RenderOnce for TableRow {
                             .px_1()
                             .whitespace_nowrap()
                             .truncate()
-                            .cursor_pointer()
                             .when(is_cell_selected, |el| el.bg(rgb(CELL_SELECTED_BG)))
                             .on_click(move |_event, _window, cx| {
                                 entity.update(cx, |this, cx| {

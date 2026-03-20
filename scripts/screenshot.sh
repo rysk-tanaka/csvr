@@ -6,9 +6,9 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BINARY="$PROJECT_DIR/target/release/csvr"
 SAMPLE_CSV="$PROJECT_DIR/examples/sample.csv"
 OUTPUT_DIR="$PROJECT_DIR/docs/images"
-WAIT_LAUNCH=10
-WAIT_ACTION=1
-WAIT_SHORT=0.5
+WAIT_LAUNCH="${WAIT_LAUNCH:-10}"
+WAIT_ACTION="${WAIT_ACTION:-1}"
+WAIT_SHORT="${WAIT_SHORT:-0.5}"
 
 # --- helpers ---
 

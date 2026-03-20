@@ -1,0 +1,28 @@
+accepted = [
+    "Apache-2.0",
+    "MIT",
+    "Unlicense",
+    "Unicode-3.0",
+    "ISC",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    "BSL-1.0",
+    "OpenSSL",
+    "MPL-2.0",
+    "CC0-1.0",
+    "NCSA",
+]
+
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+
+# cargo-about fails to parse self_cell's "Apache-2.0 OR GPL-2.0-only" (reports deprecated "GPL-2.0").
+# csvr selects Apache-2.0 from the dual license.
+# NOTE: update checksum below when self_cell version changes.
+[self_cell.clarify]
+license = "Apache-2.0"
+
+[[self_cell.clarify.files]]
+path = "LICENSE-APACHE"
+checksum = "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"

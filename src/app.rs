@@ -104,7 +104,7 @@ pub(crate) struct CsvrApp {
     chart_col: usize,
     chart_x_col: usize,
     chart_data_cache: Option<ChartData>,
-    pub focus_handle: FocusHandle,
+    pub(crate) focus_handle: FocusHandle,
 }
 
 impl Focusable for CsvrApp {
@@ -303,7 +303,7 @@ impl Render for CsvrApp {
 
                 // `/` opens search only when inactive
                 if !this.search_active && keystroke.key_char.as_deref() == Some("/") {
-                    this.search_active = true;
+                    this.toggle_search();
                     cx.notify();
                     return;
                 }

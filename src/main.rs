@@ -170,10 +170,10 @@ fn extract_column_values(
         .collect()
 }
 
-/// Downsample values to at most `max` points using uniform stride selection.
-/// First and last elements are always included to preserve data range boundaries.
+/// Downsample a slice to at most `max` points using uniform stride selection.
+/// When `max >= 2`, first and last elements are always included to preserve data range boundaries.
 /// Returns empty when `max` is 0.
-fn downsample(values: &[(usize, f64)], max: usize) -> Vec<(usize, f64)> {
+fn downsample<T: Copy>(values: &[T], max: usize) -> Vec<T> {
     if max == 0 {
         return Vec::new();
     }
@@ -184,27 +184,6 @@ fn downsample(values: &[(usize, f64)], max: usize) -> Vec<(usize, f64)> {
         return vec![values[0]];
     }
     // Linearly interpolate indices so that first and last are always included
-    let last = values.len() - 1;
-    (0..max)
-        .map(|i| {
-            let idx = (i as f64 * last as f64 / (max - 1) as f64).round() as usize;
-            values[idx]
-        })
-        .collect()
-}
-
-/// Downsample (f64, f64) pairs to at most `max` points.
-/// Uses the same first-and-last-inclusive strategy as `downsample`.
-fn downsample_pairs(values: &[(f64, f64)], max: usize) -> Vec<(f64, f64)> {
-    if max == 0 {
-        return Vec::new();
-    }
-    if values.len() <= max {
-        return values.to_vec();
-    }
-    if max == 1 {
-        return vec![values[0]];
-    }
     let last = values.len() - 1;
     (0..max)
         .map(|i| {
@@ -523,9 +502,8 @@ fn draw_chart(
                 }
                 match path.build() {
                     Ok(path) => window.paint_path(path, rgb(CHART_GREEN)),
-                    Err(_e) => {
-                        #[cfg(debug_assertions)]
-                        eprintln!("Warning: failed to build line chart path: {_e:?}");
+                    Err(e) => {
+                        eprintln!("Warning: failed to build line chart path: {e:?}");
                     }
                 }
             }
@@ -583,6 +561,7 @@ fn draw_chart(
         | (ChartType::Histogram, ChartData::Points(_) | ChartData::Pairs(_))
         | (ChartType::Scatter, ChartData::Points(_) | ChartData::Bins(_)) => {
             debug_assert!(false, "Mismatched ChartType and ChartData");
+            eprintln!("Bug: mismatched ChartType and ChartData variant");
         }
     }
 }
@@ -929,7 +908,7 @@ impl Render for CsvrApp {
                             .iter()
                             .filter_map(|(i, y)| x_map.get(i).map(|x| (*x, *y)))
                             .collect();
-                        let limited = downsample_pairs(&pairs, 500);
+                        let limited = downsample(&pairs, 500);
                         ChartData::Pairs(limited)
                     }
                 };
@@ -1385,7 +1364,7 @@ mod tests {
 
     #[test]
     fn downsample_empty() {
-        let result = downsample(&[], 10);
+        let result = downsample(&[] as &[(usize, f64)], 10);
         assert!(result.is_empty());
     }
 
@@ -1489,19 +1468,19 @@ mod tests {
         assert_eq!(result, vec![(0, 10.0), (2, 30.0)]);
     }
 
-    // --- downsample_pairs ---
+    // --- downsample with (f64, f64) pairs ---
 
     #[test]
     fn downsample_pairs_no_reduction() {
         let pairs = vec![(1.0, 2.0), (3.0, 4.0)];
-        let result = downsample_pairs(&pairs, 5);
+        let result = downsample(&pairs, 5);
         assert_eq!(result, pairs);
     }
 
     #[test]
     fn downsample_pairs_includes_last() {
         let pairs: Vec<(f64, f64)> = (0..101).map(|i| (i as f64, i as f64 * 2.0)).collect();
-        let result = downsample_pairs(&pairs, 50);
+        let result = downsample(&pairs, 50);
         assert_eq!(result.len(), 50);
         assert_eq!(result[0], (0.0, 0.0));
         assert_eq!(*result.last().unwrap(), (100.0, 200.0));
@@ -1510,8 +1489,38 @@ mod tests {
     #[test]
     fn downsample_pairs_max_zero() {
         let pairs = vec![(1.0, 2.0)];
-        let result = downsample_pairs(&pairs, 0);
+        let result = downsample(&pairs, 0);
         assert!(result.is_empty());
+    }
+
+    #[test]
+    fn downsample_pairs_max_one() {
+        let pairs = vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)];
+        let result = downsample(&pairs, 1);
+        assert_eq!(result, vec![(1.0, 2.0)]);
+    }
+
+    #[test]
+    fn downsample_max_two_returns_first_and_last() {
+        let values: Vec<(usize, f64)> = (0..10).map(|i| (i, i as f64)).collect();
+        let result = downsample(&values, 2);
+        assert_eq!(result, vec![(0, 0.0), (9, 9.0)]);
+    }
+
+    #[test]
+    fn histogram_skewed_distribution() {
+        let values = vec![0.0, 0.1, 0.2, 100.0];
+        let bins = compute_histogram_bins(&values, 10);
+        // Most values should be in the first bin, only 100.0 in the last
+        assert!(bins[0] >= 3);
+        assert_eq!(*bins.last().unwrap(), 1);
+    }
+
+    #[test]
+    fn extract_values_negative_numbers() {
+        let rows = make_rc_rows(&[&["-3.14"], &["2.5"], &["-0.001"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2], 0);
+        assert_eq!(result, vec![(0, -3.14), (1, 2.5), (2, -0.001)]);
     }
 }
 

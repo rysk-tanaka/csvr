@@ -1,0 +1,675 @@
+use std::rc::Rc;
+
+use crate::data::{CsvData, SortDirection};
+
+/// Pixel width per character (monospace approximation at text_sm)
+pub(crate) const CHAR_WIDTH: f32 = 7.5;
+pub(crate) const MIN_COL_WIDTH: f32 = 50.0;
+pub(crate) const MAX_COL_WIDTH: f32 = 400.0;
+pub(crate) const COL_PADDING: f32 = 24.0;
+pub(crate) const ROW_NUM_WIDTH: f32 = 16.0;
+
+pub(crate) fn compute_column_widths(data: &CsvData) -> Vec<f32> {
+    let sample_count = data.rows.len().min(100);
+    data.headers
+        .iter()
+        .enumerate()
+        .map(|(col_idx, header)| {
+            let max_len = data.rows[..sample_count]
+                .iter()
+                .map(|row| row.get(col_idx).map_or(0, |cell| cell.chars().count()))
+                .max()
+                .unwrap_or(0)
+                .max(header.to_uppercase().chars().count());
+            (max_len as f32 * CHAR_WIDTH + COL_PADDING)
+                .clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
+        })
+        .collect()
+}
+
+pub(crate) fn row_number_col_width(total_rows: usize) -> f32 {
+    let digits = total_rows.max(1).ilog10() as usize + 1;
+    (digits as f32 * CHAR_WIDTH + ROW_NUM_WIDTH).max(40.0)
+}
+
+pub(crate) fn filter_rows(rows: &[Rc<Vec<String>>], query: &str) -> Vec<usize> {
+    if query.is_empty() {
+        return (0..rows.len()).collect();
+    }
+    let query_lower = query.to_lowercase();
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            row.iter()
+                .any(|cell| cell.to_lowercase().contains(&query_lower))
+        })
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Determine which columns are numeric based on all rows.
+pub(crate) fn compute_numeric_columns(rows: &[Vec<String>], col_count: usize) -> Vec<bool> {
+    (0..col_count)
+        .map(|col| {
+            rows.iter().all(|row| {
+                let val = row.get(col).map(|s| s.as_str()).unwrap_or("");
+                val.is_empty() || val.parse::<f64>().is_ok()
+            })
+        })
+        .collect()
+}
+
+pub(crate) fn sort_indices(
+    rows: &[Rc<Vec<String>>],
+    indices: &[usize],
+    col: usize,
+    use_numeric: bool,
+    direction: SortDirection,
+) -> Vec<usize> {
+    if use_numeric {
+        // Pre-compute sort keys to avoid O(n log n) parses inside sort_by.
+        let mut keyed: Vec<(usize, f64)> = indices
+            .iter()
+            .map(|&i| {
+                let val = rows[i].get(col).map(|s| s.as_str()).unwrap_or("");
+                let n = val.parse::<f64>().unwrap_or(f64::NEG_INFINITY);
+                (i, n)
+            })
+            .collect();
+        keyed.sort_by(|(_, a), (_, b)| match direction {
+            SortDirection::Ascending => a.total_cmp(b),
+            SortDirection::Descending => b.total_cmp(a),
+        });
+        keyed.into_iter().map(|(i, _)| i).collect()
+    } else {
+        let mut sorted = indices.to_vec();
+        sorted.sort_by(|&a, &b| {
+            let val_a = rows[a].get(col).map(|s| s.as_str()).unwrap_or("");
+            let val_b = rows[b].get(col).map(|s| s.as_str()).unwrap_or("");
+            match direction {
+                SortDirection::Ascending => val_a.cmp(val_b),
+                SortDirection::Descending => val_b.cmp(val_a),
+            }
+        });
+        sorted
+    }
+}
+
+/// Extract finite numeric values from a specific column for the given row indices.
+/// Non-numeric, NaN, Infinity, and missing values are skipped.
+pub(crate) fn extract_column_values(
+    rows: &[Rc<Vec<String>>],
+    indices: &[usize],
+    col: usize,
+) -> Vec<(usize, f64)> {
+    indices
+        .iter()
+        .filter_map(|&i| {
+            let val = rows.get(i)?.get(col)?.as_str();
+            val.parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .map(|v| (i, v))
+        })
+        .collect()
+}
+
+/// Downsample a slice to at most `max` points using uniform stride selection.
+/// When `max >= 2`, first and last elements are always included to preserve data range boundaries.
+/// Returns empty when `max` is 0.
+pub(crate) fn downsample<T: Copy>(values: &[T], max: usize) -> Vec<T> {
+    if max == 0 {
+        return Vec::new();
+    }
+    if values.len() <= max {
+        return values.to_vec();
+    }
+    if max == 1 {
+        return vec![values[0]];
+    }
+    // Linearly interpolate indices so that first and last are always included
+    let last = values.len() - 1;
+    (0..max)
+        .map(|i| {
+            let idx = (i as f64 * last as f64 / (max - 1) as f64).round() as usize;
+            values[idx]
+        })
+        .collect()
+}
+
+/// Extract paired finite numeric values from two columns for the given row indices.
+/// Only rows where both columns have a valid finite number are included.
+pub(crate) fn extract_scatter_pairs(
+    rows: &[Rc<Vec<String>>],
+    indices: &[usize],
+    x_col: usize,
+    y_col: usize,
+) -> Vec<(f64, f64)> {
+    indices
+        .iter()
+        .filter_map(|&i| {
+            let row = rows.get(i)?;
+            let x = row.get(x_col)?.parse::<f64>().ok().filter(|v| v.is_finite())?;
+            let y = row.get(y_col)?.parse::<f64>().ok().filter(|v| v.is_finite())?;
+            Some((x, y))
+        })
+        .collect()
+}
+
+/// Compute histogram bin counts for the given values.
+pub(crate) fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<usize> {
+    if values.is_empty() || bin_count == 0 {
+        return vec![0; bin_count];
+    }
+    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    let range = max - min;
+    if range.abs() < f64::EPSILON {
+        // All values identical — put everything in the middle bin
+        let mut bins = vec![0; bin_count];
+        bins[bin_count / 2] = values.len();
+        return bins;
+    }
+    let mut bins = vec![0; bin_count];
+    for &v in values {
+        let idx = ((v - min) / range * bin_count as f64) as usize;
+        bins[idx.min(bin_count - 1)] += 1;
+    }
+    bins
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::data::CsvData;
+
+    fn make_csv_data(headers: &[&str], rows: &[&[&str]]) -> CsvData {
+        CsvData {
+            headers: headers.iter().map(|s| s.to_string()).collect(),
+            rows: rows
+                .iter()
+                .map(|row| row.iter().map(|s| s.to_string()).collect())
+                .collect(),
+        }
+    }
+
+    fn make_rc_rows(rows: &[&[&str]]) -> Vec<Rc<Vec<String>>> {
+        rows.iter()
+            .map(|row| Rc::new(row.iter().map(|s| s.to_string()).collect()))
+            .collect()
+    }
+
+    // --- compute_column_widths ---
+
+    #[test]
+    fn column_widths_basic() {
+        let data = make_csv_data(&["name", "age"], &[&["Alice", "30"], &["Bob", "25"]]);
+        let widths = compute_column_widths(&data);
+        assert_eq!(widths.len(), 2);
+        assert!((widths[0] - 61.5).abs() < 0.01);
+        assert!((widths[1] - MIN_COL_WIDTH).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_clamp_to_max() {
+        let long_value = "x".repeat(100);
+        let data = make_csv_data(&["col"], &[&[&long_value]]);
+        let widths = compute_column_widths(&data);
+        assert!((widths[0] - MAX_COL_WIDTH).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_empty_rows() {
+        let data = make_csv_data(&["name", "age"], &[]);
+        let widths = compute_column_widths(&data);
+        assert!((widths[0] - 54.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_header_longer_than_data() {
+        let data = make_csv_data(&["description"], &[&["hi"]]);
+        let widths = compute_column_widths(&data);
+        assert!((widths[0] - 106.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn parse_ragged_rows() {
+        let input = "a,b,c\n1,2\n4,5,6\n";
+        let result = CsvData::from_reader(input.as_bytes());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn column_widths_short_rows() {
+        let data = make_csv_data(&["a", "b", "c"], &[&["x", "y"]]);
+        let widths = compute_column_widths(&data);
+        assert_eq!(widths.len(), 3);
+        assert!((widths[2] - MIN_COL_WIDTH).abs() < 0.01);
+    }
+
+    // --- row_number_col_width ---
+
+    #[test]
+    fn row_num_width_zero_rows() {
+        let w = row_number_col_width(0);
+        assert!((w - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn row_num_width_single_digit() {
+        let w = row_number_col_width(9);
+        assert!((w - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn row_num_width_boundary_ten() {
+        let w = row_number_col_width(10);
+        assert!((w - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn row_num_width_two_digits() {
+        let w = row_number_col_width(99);
+        assert!((w - 40.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn row_num_width_four_digits() {
+        let w = row_number_col_width(9999);
+        assert!((w - 46.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn row_num_width_large() {
+        let w = row_number_col_width(1_000_000);
+        assert!((w - 68.5).abs() < 0.01);
+    }
+
+    // --- filter_rows ---
+
+    #[test]
+    fn filter_empty_query_returns_all() {
+        let rows = make_rc_rows(&[&["Alice", "30"], &["Bob", "25"]]);
+        assert_eq!(filter_rows(&rows, ""), vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_matches_substring() {
+        let rows = make_rc_rows(&[&["Alice", "Tokyo"], &["Bob", "Osaka"], &["Carol", "Tokyo"]]);
+        assert_eq!(filter_rows(&rows, "tokyo"), vec![0, 2]);
+    }
+
+    #[test]
+    fn filter_case_insensitive() {
+        let rows = make_rc_rows(&[&["ALICE"], &["alice"], &["Alice"]]);
+        assert_eq!(filter_rows(&rows, "alice"), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filter_no_matches() {
+        let rows = make_rc_rows(&[&["Alice"], &["Bob"]]);
+        let result = filter_rows(&rows, "xyz");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_matches_any_column() {
+        let rows = make_rc_rows(&[&["Alice", "30", "Tokyo"], &["Bob", "25", "Osaka"]]);
+        assert_eq!(filter_rows(&rows, "25"), vec![1]);
+    }
+
+    #[test]
+    fn filter_empty_rows() {
+        let rows: Vec<Rc<Vec<String>>> = vec![];
+        assert!(filter_rows(&rows, "test").is_empty());
+    }
+
+    // --- sort_indices ---
+
+    #[test]
+    fn sort_string_ascending() {
+        let rows = make_rc_rows(&[&["Charlie"], &["Alice"], &["Bob"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn sort_string_descending() {
+        let rows = make_rc_rows(&[&["Charlie"], &["Alice"], &["Bob"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Descending);
+        assert_eq!(result, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn sort_numeric_ascending() {
+        let rows = make_rc_rows(&[&["100"], &["3"], &["25"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn sort_numeric_descending() {
+        let rows = make_rc_rows(&[&["100"], &["3"], &["25"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Descending);
+        assert_eq!(result, vec![0, 2, 1]);
+    }
+
+    #[test]
+    fn sort_respects_filtered_indices() {
+        let rows = make_rc_rows(&[&["C"], &["A"], &["B"], &["D"]]);
+        let indices = vec![0, 2, 3];
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
+        assert_eq!(result, vec![2, 0, 3]);
+    }
+
+    #[test]
+    fn sort_mixed_numeric_and_string_uses_string_comparison() {
+        let rows = make_rc_rows(&[&["banana"], &["10"], &["apple"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn sort_empty_indices() {
+        let rows = make_rc_rows(&[&["A"]]);
+        let result = sort_indices(&rows, &[], 0, false, SortDirection::Ascending);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn sort_with_missing_column() {
+        let rows = make_rc_rows(&[&["A", "1"], &["B"]]);
+        let indices = vec![0, 1];
+        let result = sort_indices(&rows, &indices, 1, true, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 0]);
+    }
+
+    #[test]
+    fn sort_numeric_with_nan() {
+        let rows = make_rc_rows(&[&["NaN"], &["0"], &["1"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Ascending);
+        assert_eq!(result, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn sort_numeric_with_nan_descending() {
+        let rows = make_rc_rows(&[&["NaN"], &["0"], &["1"]]);
+        let indices = vec![0, 1, 2];
+        let result = sort_indices(&rows, &indices, 0, true, SortDirection::Descending);
+        assert_eq!(result, vec![0, 2, 1]);
+    }
+
+    // --- compute_numeric_columns ---
+
+    #[test]
+    fn numeric_columns_detection() {
+        let data = make_csv_data(&["name", "age", "score"], &[&["Alice", "30", "95.5"], &["Bob", "25", "87.0"]]);
+        let result = compute_numeric_columns(&data.rows, data.headers.len());
+        assert_eq!(result, vec![false, true, true]);
+    }
+
+    #[test]
+    fn numeric_columns_with_empty_values() {
+        let data = make_csv_data(&["val"], &[&["1"], &[""], &["3"]]);
+        let result = compute_numeric_columns(&data.rows, data.headers.len());
+        assert_eq!(result, vec![true]);
+    }
+
+    #[test]
+    fn numeric_columns_mixed() {
+        let data = make_csv_data(&["col"], &[&["1"], &["abc"], &["3"]]);
+        let result = compute_numeric_columns(&data.rows, data.headers.len());
+        assert_eq!(result, vec![false]);
+    }
+
+    // --- extract_column_values ---
+
+    #[test]
+    fn extract_values_basic() {
+        let rows = make_rc_rows(&[&["10", "a"], &["20", "b"], &["30", "c"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2], 0);
+        assert_eq!(result, vec![(0, 10.0), (1, 20.0), (2, 30.0)]);
+    }
+
+    #[test]
+    fn extract_values_skips_non_numeric() {
+        let rows = make_rc_rows(&[&["10"], &["abc"], &["30"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2], 0);
+        assert_eq!(result, vec![(0, 10.0), (2, 30.0)]);
+    }
+
+    #[test]
+    fn extract_values_respects_indices() {
+        let rows = make_rc_rows(&[&["10"], &["20"], &["30"]]);
+        let result = extract_column_values(&rows, &[0, 2], 0);
+        assert_eq!(result, vec![(0, 10.0), (2, 30.0)]);
+    }
+
+    #[test]
+    fn extract_values_empty_indices() {
+        let rows = make_rc_rows(&[&["10"]]);
+        let result = extract_column_values(&rows, &[], 0);
+        assert!(result.is_empty());
+    }
+
+    // --- downsample ---
+
+    #[test]
+    fn downsample_no_reduction_needed() {
+        let values: Vec<(usize, f64)> = vec![(0, 1.0), (1, 2.0), (2, 3.0)];
+        let result = downsample(&values, 5);
+        assert_eq!(result, values);
+    }
+
+    #[test]
+    fn downsample_reduces_to_max() {
+        let values: Vec<(usize, f64)> = (0..100).map(|i| (i, i as f64)).collect();
+        let result = downsample(&values, 10);
+        assert_eq!(result.len(), 10);
+        assert_eq!(result[0], (0, 0.0));
+        assert_eq!(*result.last().unwrap(), (99, 99.0));
+    }
+
+    #[test]
+    fn downsample_includes_last_element() {
+        let values: Vec<(usize, f64)> = (0..101).map(|i| (i, i as f64)).collect();
+        let result = downsample(&values, 100);
+        assert_eq!(result.len(), 100);
+        assert_eq!(result[0], (0, 0.0));
+        assert_eq!(*result.last().unwrap(), (100, 100.0));
+    }
+
+    #[test]
+    fn downsample_empty() {
+        let result = downsample(&[] as &[(usize, f64)], 10);
+        assert!(result.is_empty());
+    }
+
+    // --- compute_histogram_bins ---
+
+    #[test]
+    fn histogram_basic() {
+        let values = vec![1.0, 2.0, 3.0, 4.0, 5.0];
+        let bins = compute_histogram_bins(&values, 5);
+        assert_eq!(bins.len(), 5);
+        let total: usize = bins.iter().sum();
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn histogram_all_same_value() {
+        let values = vec![5.0, 5.0, 5.0];
+        let bins = compute_histogram_bins(&values, 4);
+        assert_eq!(bins.len(), 4);
+        assert_eq!(bins[2], 3);
+        assert_eq!(bins.iter().sum::<usize>(), 3);
+    }
+
+    #[test]
+    fn histogram_empty_values() {
+        let bins = compute_histogram_bins(&[], 5);
+        assert_eq!(bins, vec![0, 0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn histogram_single_value() {
+        let bins = compute_histogram_bins(&[42.0], 3);
+        assert_eq!(bins.iter().sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn histogram_max_value_in_last_bin() {
+        let bins = compute_histogram_bins(&[0.0, 5.0, 10.0], 5);
+        assert_eq!(bins.len(), 5);
+        assert_eq!(bins.iter().sum::<usize>(), 3);
+        assert!(bins[4] > 0);
+    }
+
+    #[test]
+    fn histogram_negative_values() {
+        let bins = compute_histogram_bins(&[-10.0, -5.0, 0.0, 5.0, 10.0], 5);
+        assert_eq!(bins.iter().sum::<usize>(), 5);
+    }
+
+    #[test]
+    fn histogram_zero_bins() {
+        let bins = compute_histogram_bins(&[1.0, 2.0], 0);
+        assert!(bins.is_empty());
+    }
+
+    // --- downsample edge cases ---
+
+    #[test]
+    fn downsample_max_zero_returns_empty() {
+        let values: Vec<(usize, f64)> = vec![(0, 1.0), (1, 2.0)];
+        let result = downsample(&values, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn downsample_max_one_returns_first() {
+        let values: Vec<(usize, f64)> = vec![(0, 1.0), (1, 2.0), (2, 3.0)];
+        let result = downsample(&values, 1);
+        assert_eq!(result, vec![(0, 1.0)]);
+    }
+
+    // --- extract_column_values edge cases ---
+
+    #[test]
+    fn extract_values_skips_nan_and_infinity() {
+        let rows = make_rc_rows(&[&["10"], &["NaN"], &["inf"], &["-inf"], &["30"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2, 3, 4], 0);
+        assert_eq!(result, vec![(0, 10.0), (4, 30.0)]);
+    }
+
+    #[test]
+    fn extract_values_out_of_bounds_index() {
+        let rows = make_rc_rows(&[&["10"], &["20"]]);
+        let result = extract_column_values(&rows, &[0, 5, 1], 0);
+        assert_eq!(result, vec![(0, 10.0), (1, 20.0)]);
+    }
+
+    #[test]
+    fn extract_values_out_of_bounds_col() {
+        let rows = make_rc_rows(&[&["10"], &["20"]]);
+        let result = extract_column_values(&rows, &[0, 1], 5);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn extract_values_empty_string() {
+        let rows = make_rc_rows(&[&["10"], &[""], &["30"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2], 0);
+        assert_eq!(result, vec![(0, 10.0), (2, 30.0)]);
+    }
+
+    // --- downsample with (f64, f64) pairs ---
+
+    #[test]
+    fn downsample_pairs_no_reduction() {
+        let pairs = vec![(1.0, 2.0), (3.0, 4.0)];
+        let result = downsample(&pairs, 5);
+        assert_eq!(result, pairs);
+    }
+
+    #[test]
+    fn downsample_pairs_includes_last() {
+        let pairs: Vec<(f64, f64)> = (0..101).map(|i| (i as f64, i as f64 * 2.0)).collect();
+        let result = downsample(&pairs, 50);
+        assert_eq!(result.len(), 50);
+        assert_eq!(result[0], (0.0, 0.0));
+        assert_eq!(*result.last().unwrap(), (100.0, 200.0));
+    }
+
+    #[test]
+    fn downsample_pairs_max_zero() {
+        let pairs = vec![(1.0, 2.0)];
+        let result = downsample(&pairs, 0);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn downsample_pairs_max_one() {
+        let pairs = vec![(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)];
+        let result = downsample(&pairs, 1);
+        assert_eq!(result, vec![(1.0, 2.0)]);
+    }
+
+    #[test]
+    fn downsample_max_two_returns_first_and_last() {
+        let values: Vec<(usize, f64)> = (0..10).map(|i| (i, i as f64)).collect();
+        let result = downsample(&values, 2);
+        assert_eq!(result, vec![(0, 0.0), (9, 9.0)]);
+    }
+
+    #[test]
+    fn histogram_skewed_distribution() {
+        let values = vec![0.0, 0.1, 0.2, 100.0];
+        let bins = compute_histogram_bins(&values, 10);
+        assert!(bins[0] >= 3);
+        assert_eq!(*bins.last().unwrap(), 1);
+    }
+
+    #[test]
+    fn extract_values_negative_numbers() {
+        let rows = make_rc_rows(&[&["-3.14"], &["2.5"], &["-0.001"]]);
+        let result = extract_column_values(&rows, &[0, 1, 2], 0);
+        assert_eq!(result, vec![(0, -3.14), (1, 2.5), (2, -0.001)]);
+    }
+
+    // --- extract_scatter_pairs ---
+
+    #[test]
+    fn scatter_pairs_basic() {
+        let rows = make_rc_rows(&[&["1", "10"], &["2", "20"], &["3", "30"]]);
+        let result = extract_scatter_pairs(&rows, &[0, 1, 2], 0, 1);
+        assert_eq!(result, vec![(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)]);
+    }
+
+    #[test]
+    fn scatter_pairs_skips_non_numeric_in_either_column() {
+        let rows = make_rc_rows(&[&["1", "10"], &["abc", "20"], &["3", "xyz"], &["4", "40"]]);
+        let result = extract_scatter_pairs(&rows, &[0, 1, 2, 3], 0, 1);
+        assert_eq!(result, vec![(1.0, 10.0), (4.0, 40.0)]);
+    }
+
+    #[test]
+    fn scatter_pairs_empty_indices() {
+        let rows = make_rc_rows(&[&["1", "10"]]);
+        let result = extract_scatter_pairs(&rows, &[], 0, 1);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn scatter_pairs_filters_nan_infinity() {
+        let rows = make_rc_rows(&[&["1", "NaN"], &["inf", "2"], &["3", "4"]]);
+        let result = extract_scatter_pairs(&rows, &[0, 1, 2], 0, 1);
+        assert_eq!(result, vec![(3.0, 4.0)]);
+    }
+}

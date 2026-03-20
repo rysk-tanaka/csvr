@@ -1,7 +1,7 @@
 use std::{ops::Range, rc::Rc};
 
 use gpui::{
-    App, Context, Focusable, FocusHandle, KeyDownEvent,
+    App, ClipboardItem, Context, Entity, Focusable, FocusHandle, KeyDownEvent,
     ListHorizontalSizingBehavior, Render, SharedString, UniformListScrollHandle,
     Window, actions, canvas, div, prelude::*, px, rgb,
     uniform_list,
@@ -18,7 +18,7 @@ use crate::data::{
     CHART_TYPES, ChartData, ChartType, CsvData, SortDirection,
 };
 
-actions!(csvr, [ToggleSearch, DismissSearch, ToggleChart]);
+actions!(csvr, [ToggleSearch, DismissSearch, ToggleChart, CopySelection]);
 
 // Catppuccin Mocha palette
 const BG_BASE: u32 = 0x1e1e2e;
@@ -30,6 +30,9 @@ const ROW_ALT_BG: u32 = 0x1e1e2e; // Base
 const ROW_EVEN_BG: u32 = 0x11111b; // Crust (darker for contrast)
 const SEARCH_BG: u32 = 0x313244; // Surface0
 const SURFACE1: u32 = 0x45475a;
+const ROW_HOVER_BG: u32 = 0x27273a; // Between Base and Surface0 — hover
+const ROW_SELECTED_BG: u32 = 0x313244; // Surface0 — selected row
+const CELL_SELECTED_BG: u32 = 0x45475a; // Surface1 — selected cell
 
 #[derive(IntoElement)]
 struct TableRow {
@@ -39,33 +42,56 @@ struct TableRow {
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
     min_row_width: gpui::Pixels,
+    /// None = not selected, Some(None) = entire row selected, Some(Some(c)) = cell c selected
+    selected_col: Option<Option<usize>>,
+    entity: Entity<CsvrApp>,
 }
 
 impl RenderOnce for TableRow {
     fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
-        let bg = if self.ix.is_multiple_of(2) {
+        let is_row_selected = self.selected_col.is_some();
+        let bg = if is_row_selected {
+            ROW_SELECTED_BG
+        } else if self.ix.is_multiple_of(2) {
             ROW_EVEN_BG
         } else {
             ROW_ALT_BG
         };
 
+        let entity = self.entity.clone();
+        let ix = self.ix;
+        let selected_col = self.selected_col;
+
         div()
+            .id(("row", ix))
             .flex()
             .flex_row()
             .min_w(self.min_row_width)
             .border_b_1()
             .border_color(rgb(BORDER_COLOR))
             .bg(rgb(bg))
+            .when(!is_row_selected, |el| {
+                el.hover(|style| style.bg(rgb(ROW_HOVER_BG)))
+            })
             .py_0p5()
-            .child(
+            .child({
+                let entity = entity.clone();
                 div()
+                    .id(("row-num", ix))
                     .w(px(self.row_num_width))
                     .flex_shrink_0()
                     .px_1()
                     .text_color(rgb(TEXT_SUBTEXT))
                     .text_right()
-                    .child(self.row_num.to_string()),
-            )
+                    .cursor_pointer()
+                    .on_click(move |_event, _window, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.select_cell(ix, None);
+                            cx.notify();
+                        });
+                    })
+                    .child(self.row_num.to_string())
+            })
             .children(
                 self.col_widths
                     .iter()
@@ -77,12 +103,23 @@ impl RenderOnce for TableRow {
                             .cloned()
                             .unwrap_or_default()
                             .into();
+                        let is_cell_selected =
+                            matches!(selected_col, Some(Some(c)) if c == col_idx);
+                        let entity = entity.clone();
                         div()
+                            .id(SharedString::from(format!("cell-{}-{}", ix, col_idx)))
                             .w(px(width))
                             .flex_shrink_0()
                             .px_1()
                             .whitespace_nowrap()
                             .truncate()
+                            .when(is_cell_selected, |el| el.bg(rgb(CELL_SELECTED_BG)))
+                            .on_click(move |_event, _window, cx| {
+                                entity.update(cx, |this, cx| {
+                                    this.select_cell(ix, Some(col_idx));
+                                    cx.notify();
+                                });
+                            })
                             .child(text)
                     }),
             )
@@ -106,6 +143,8 @@ pub(crate) struct CsvrApp {
     chart_col: usize,
     chart_x_col: usize,
     chart_data_cache: Option<ChartData>,
+    /// Selected cell: (filtered_index, column). column=None means entire row.
+    selected_cell: Option<(usize, Option<usize>)>,
     pub(crate) focus_handle: FocusHandle,
 }
 
@@ -158,6 +197,7 @@ impl CsvrApp {
             chart_col: first_numeric,
             chart_x_col: second_numeric,
             chart_data_cache: None,
+            selected_cell: None,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -169,6 +209,7 @@ impl CsvrApp {
             self.filtered_indices =
                 sort_indices(&self.rows, &self.filtered_indices, col, use_numeric, direction);
         }
+        self.selected_cell = None;
         if self.chart_active {
             self.recompute_chart_data();
         }
@@ -266,6 +307,82 @@ impl CsvrApp {
         });
     }
 
+    fn select_cell(&mut self, filtered_idx: usize, col: Option<usize>) {
+        if self.filtered_indices.is_empty() {
+            self.clear_selection();
+            return;
+        }
+        let clamped = filtered_idx.min(self.filtered_indices.len() - 1);
+        self.selected_cell = Some((clamped, col));
+    }
+
+    fn clear_selection(&mut self) {
+        self.selected_cell = None;
+    }
+
+    fn move_selection(&mut self, row_delta: isize, col_delta: isize) {
+        let row_count = self.filtered_indices.len();
+        if row_count == 0 {
+            return;
+        }
+        let col_count = self.headers.len();
+
+        let (row, col) = match self.selected_cell {
+            Some((r, c)) => (r, c),
+            None => {
+                let initial_col = if col_count > 0 { Some(0) } else { None };
+                self.selected_cell = Some((0, initial_col));
+                self.ensure_visible(0);
+                return;
+            }
+        };
+
+        let new_row = (row as isize + row_delta).clamp(0, row_count as isize - 1) as usize;
+
+        let new_col = match col {
+            Some(c) if col_count > 0 => {
+                let new_c = (c as isize + col_delta).clamp(0, col_count as isize - 1) as usize;
+                Some(new_c)
+            }
+            _ => {
+                if col_delta > 0 && col_count > 0 {
+                    Some(0)
+                } else {
+                    None
+                }
+            }
+        };
+
+        self.selected_cell = Some((new_row, new_col));
+        self.ensure_visible(new_row);
+    }
+
+    fn ensure_visible(&self, filtered_idx: usize) {
+        if filtered_idx < self.visible_range.start || filtered_idx >= self.visible_range.end {
+            self.scroll_handle
+                .scroll_to_item(filtered_idx, gpui::ScrollStrategy::Center);
+        }
+    }
+
+    fn copy_selection(&self, cx: &mut Context<Self>) {
+        let Some((filtered_idx, col)) = self.selected_cell else {
+            return;
+        };
+        let Some(&original_idx) = self.filtered_indices.get(filtered_idx) else {
+            return;
+        };
+        let Some(row) = self.rows.get(original_idx) else {
+            return;
+        };
+
+        let text = match col {
+            Some(c) => row.get(c).cloned().unwrap_or_default(),
+            None => row.join("\t"),
+        };
+
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
     fn numeric_col_indices(&self) -> Vec<usize> {
         self.numeric_columns
             .iter()
@@ -295,14 +412,47 @@ impl Render for CsvrApp {
                 if this.search_active {
                     this.close_search();
                     cx.notify();
+                } else if this.selected_cell.is_some() {
+                    this.clear_selection();
+                    cx.notify();
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleChart, _window, cx| {
                 this.toggle_chart();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &CopySelection, _window, cx| {
+                this.copy_selection(cx);
+            }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let keystroke = &event.keystroke;
+
+                // Arrow key navigation (works regardless of search state)
+                if !keystroke.modifiers.platform && !keystroke.modifiers.control {
+                    match keystroke.key.as_str() {
+                        "up" => {
+                            this.move_selection(-1, 0);
+                            cx.notify();
+                            return;
+                        }
+                        "down" => {
+                            this.move_selection(1, 0);
+                            cx.notify();
+                            return;
+                        }
+                        "left" => {
+                            this.move_selection(0, -1);
+                            cx.notify();
+                            return;
+                        }
+                        "right" => {
+                            this.move_selection(0, 1);
+                            cx.notify();
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
 
                 // `/` opens search only when inactive
                 if !this.search_active && keystroke.key_char.as_deref() == Some("/") {
@@ -640,13 +790,17 @@ impl Render for CsvrApp {
             })
             // Body
             .child(
-                div().flex_1().size_full().child(
+                div().flex_1().size_full().child({
+                    let entity_for_rows = entity.clone();
                     uniform_list(entity, "rows", filtered_count, {
                         move |this, range, _, _| {
                             this.visible_range = range.clone();
                             range
                                 .filter_map(|i| {
                                     let original_idx = *this.filtered_indices.get(i)?;
+                                    let selected_col = this.selected_cell.and_then(|(sel_row, col)| {
+                                        if sel_row == i { Some(col) } else { None }
+                                    });
                                     Some(TableRow {
                                         ix: i,
                                         row_num: original_idx + 1,
@@ -654,6 +808,8 @@ impl Render for CsvrApp {
                                         col_widths: this.col_widths.clone(),
                                         row_num_width: this.row_num_width,
                                         min_row_width: viewport_width,
+                                        selected_col,
+                                        entity: entity_for_rows.clone(),
                                     })
                                 })
                                 .collect()
@@ -663,8 +819,8 @@ impl Render for CsvrApp {
                         ListHorizontalSizingBehavior::Unconstrained,
                     )
                     .size_full()
-                    .track_scroll(self.scroll_handle.clone()),
-                ),
+                    .track_scroll(self.scroll_handle.clone())
+                }),
             )
     }
 }

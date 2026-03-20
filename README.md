@@ -1,28 +1,33 @@
 # csvr
 
-> CLI から起動する CSV ビューワー。[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui)（Zed の UI フレームワーク）で構築。
+[![lint](https://github.com/rysk-tanaka/csvr/actions/workflows/lint.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/lint.yml)
+[![test](https://github.com/rysk-tanaka/csvr/actions/workflows/test.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/test.yml)
+[![build](https://github.com/rysk-tanaka/csvr/actions/workflows/build.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/build.yml)
+[![GPUI](https://img.shields.io/badge/GPUI-v0.188.6-blue)](https://github.com/zed-industries/zed/tree/main/crates/gpui)
 
----
-
-## 概要
-
-csvr はターミナルから CSV ファイルを指定して GUI ウィンドウでテーブル表示するツールです。
+> CLI から起動する CSV ビューワー。[GPUI](https://github.com/zed-industries/zed/tree/main/crates/gpui) で構築。
 
 - ファイル指定（`csvr data.csv`）またはパイプ入力（`cat data.csv | csvr`）に対応
 - 大規模 CSV（数万〜数十万行）でも仮想スクロールで高速に表示
 - macOS ネイティブ（Metal レンダリング）
 
+## スクリーンショット
+
+| テーブル表示 | 検索 | グラフプレビュー |
+| :---: | :---: | :---: |
+| ![テーブル表示](docs/images/table.png) | ![検索](docs/images/search.png) | ![グラフプレビュー](docs/images/chart.png) |
+
 ---
 
 ## 機能
 
-- [x] CSV 読み込み・テーブル表示
-- [x] 列固定ヘッダー
-- [x] 列幅の自動調整
-- [x] 行番号表示
-- [x] インクリメンタル検索・フィルタ（`Cmd+F` / `/`）
-- [x] 列ソート（昇順/降順） — ヘッダークリックで昇順→降順→解除
-- [x] グラフプレビュー（`Cmd+G`） — 棒グラフ・折れ線・散布図・ヒストグラム
+- CSV 読み込み・テーブル表示
+- 列固定ヘッダー
+- 列幅の自動調整
+- 行番号表示
+- インクリメンタル検索・フィルタ（`Cmd+F` / `/`）
+- 列ソート（昇順/降順） — ヘッダークリックで昇順→降順→解除
+- グラフプレビュー（`Cmd+G`） — 棒グラフ・折れ線・散布図・ヒストグラム
 
 ---
 

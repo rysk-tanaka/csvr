@@ -201,7 +201,7 @@ fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<usize> {
     let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
     let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let range = max - min;
-    if range == 0.0 {
+    if range.abs() < f64::EPSILON {
         // All values identical — put everything in the middle bin
         let mut bins = vec![0; bin_count];
         bins[bin_count / 2] = values.len();
@@ -303,6 +303,7 @@ struct CsvrApp {
     chart_type: ChartType,
     chart_col: usize,
     chart_x_col: usize,
+    chart_data_cache: Option<ChartData>,
     focus_handle: FocusHandle,
 }
 
@@ -354,6 +355,7 @@ impl CsvrApp {
             chart_type: ChartType::Bar,
             chart_col: first_numeric,
             chart_x_col: second_numeric,
+            chart_data_cache: None,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -364,6 +366,9 @@ impl CsvrApp {
             let use_numeric = self.numeric_columns.get(col).copied().unwrap_or(false);
             self.filtered_indices =
                 sort_indices(&self.rows, &self.filtered_indices, col, use_numeric, direction);
+        }
+        if self.chart_active {
+            self.recompute_chart_data();
         }
     }
 
@@ -402,22 +407,69 @@ impl CsvrApp {
 
     fn toggle_chart(&mut self) {
         self.chart_active = !self.chart_active;
+        if self.chart_active {
+            self.recompute_chart_data();
+        }
     }
 
     fn set_chart_type(&mut self, ct: ChartType) {
         self.chart_type = ct;
+        self.recompute_chart_data();
     }
 
     fn set_chart_col(&mut self, col: usize) {
         if self.numeric_columns.get(col).copied().unwrap_or(false) {
             self.chart_col = col;
+            self.recompute_chart_data();
         }
     }
 
     fn set_chart_x_col(&mut self, col: usize) {
         if self.numeric_columns.get(col).copied().unwrap_or(false) {
             self.chart_x_col = col;
+            self.recompute_chart_data();
         }
+    }
+
+    fn recompute_chart_data(&mut self) {
+        if !self.chart_active || self.filtered_indices.is_empty() {
+            self.chart_data_cache = None;
+            return;
+        }
+        let has_numeric = self.numeric_columns.iter().any(|&b| b);
+        if !has_numeric {
+            self.chart_data_cache = None;
+            return;
+        }
+        let y_values = extract_column_values(&self.rows, &self.filtered_indices, self.chart_col);
+        self.chart_data_cache = Some(match self.chart_type {
+            ChartType::Bar => {
+                let sampled = downsample(&y_values, 100);
+                ChartData::Points(sampled.into_iter().map(|(_, v)| v).collect())
+            }
+            ChartType::Line => {
+                let sampled = downsample(&y_values, 500);
+                ChartData::Points(sampled.into_iter().map(|(_, v)| v).collect())
+            }
+            ChartType::Histogram => {
+                let vals: Vec<f64> = y_values.iter().map(|(_, v)| *v).collect();
+                let bins = compute_histogram_bins(&vals, 30);
+                ChartData::Bins(bins)
+            }
+            ChartType::Scatter => {
+                let x_values = extract_column_values(&self.rows, &self.filtered_indices, self.chart_x_col);
+                // Match x and y by row index using zip (both are derived from filtered_indices)
+                let pairs: Vec<(f64, f64)> = x_values
+                    .into_iter()
+                    .zip(y_values.iter())
+                    .filter_map(|((ix, x), (iy, y))| {
+                        if ix == *iy { Some((x, *y)) } else { None }
+                    })
+                    .collect();
+                let limited = downsample(&pairs, 500);
+                ChartData::Pairs(limited)
+            }
+        });
     }
 
     fn numeric_col_indices(&self) -> Vec<usize> {
@@ -430,6 +482,7 @@ impl CsvrApp {
     }
 }
 
+#[derive(Clone)]
 enum ChartData {
     Points(Vec<f64>),
     Bins(Vec<usize>),
@@ -561,7 +614,9 @@ fn draw_chart(
         | (ChartType::Histogram, ChartData::Points(_) | ChartData::Pairs(_))
         | (ChartType::Scatter, ChartData::Points(_) | ChartData::Bins(_)) => {
             debug_assert!(false, "Mismatched ChartType and ChartData");
-            eprintln!("Bug: mismatched ChartType and ChartData variant");
+            if cfg!(debug_assertions) {
+                eprintln!("Bug: mismatched ChartType and ChartData variant");
+            }
         }
     }
 }
@@ -863,6 +918,16 @@ impl Render for CsvrApp {
                         )
                     });
 
+                // Add X==Y warning for Scatter when both columns are the same
+                let toolbar = toolbar.when(chart_type == ChartType::Scatter && chart_col == chart_x_col, |el| {
+                    el.child(
+                        div()
+                            .text_xs()
+                            .text_color(rgb(CHART_PEACH))
+                            .child("X = Y"),
+                    )
+                });
+
                 if !has_numeric || self.filtered_indices.is_empty() {
                     let message = if !has_numeric { "No numeric columns" } else { "No data" };
                     return el.child(toolbar).child(
@@ -884,34 +949,8 @@ impl Render for CsvrApp {
                     );
                 }
 
-                // Pre-compute chart data for the canvas closure
-                let y_values = extract_column_values(&self.rows, &self.filtered_indices, chart_col);
-                let chart_data: ChartData = match chart_type {
-                    ChartType::Bar => {
-                        let sampled = downsample(&y_values, 100);
-                        ChartData::Points(sampled.into_iter().map(|(_, v)| v).collect())
-                    }
-                    ChartType::Line => {
-                        let sampled = downsample(&y_values, 500);
-                        ChartData::Points(sampled.into_iter().map(|(_, v)| v).collect())
-                    }
-                    ChartType::Histogram => {
-                        let vals: Vec<f64> = y_values.iter().map(|(_, v)| *v).collect();
-                        let bins = compute_histogram_bins(&vals, 30);
-                        ChartData::Bins(bins)
-                    }
-                    ChartType::Scatter => {
-                        let x_values = extract_column_values(&self.rows, &self.filtered_indices, chart_x_col);
-                        // Match x and y by row index
-                        let x_map: std::collections::HashMap<usize, f64> = x_values.into_iter().collect();
-                        let pairs: Vec<(f64, f64)> = y_values
-                            .iter()
-                            .filter_map(|(i, y)| x_map.get(i).map(|x| (*x, *y)))
-                            .collect();
-                        let limited = downsample(&pairs, 500);
-                        ChartData::Pairs(limited)
-                    }
-                };
+                // Use cached chart data (recomputed on state changes, not every render)
+                let chart_data = self.chart_data_cache.clone().unwrap_or(ChartData::Points(Vec::new()));
 
                 el.child(toolbar).child(
                     div()

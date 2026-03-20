@@ -193,6 +193,25 @@ fn downsample<T: Copy>(values: &[T], max: usize) -> Vec<T> {
         .collect()
 }
 
+/// Extract paired finite numeric values from two columns for the given row indices.
+/// Only rows where both columns have a valid finite number are included.
+fn extract_scatter_pairs(
+    rows: &[Rc<Vec<String>>],
+    indices: &[usize],
+    x_col: usize,
+    y_col: usize,
+) -> Vec<(f64, f64)> {
+    indices
+        .iter()
+        .filter_map(|&i| {
+            let row = rows.get(i)?;
+            let x = row.get(x_col)?.parse::<f64>().ok().filter(|v| v.is_finite())?;
+            let y = row.get(y_col)?.parse::<f64>().ok().filter(|v| v.is_finite())?;
+            Some((x, y))
+        })
+        .collect()
+}
+
 /// Compute histogram bin counts for the given values.
 fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<usize> {
     if values.is_empty() || bin_count == 0 {
@@ -457,15 +476,7 @@ impl CsvrApp {
                 ChartData::Bins(bins)
             }
             ChartType::Scatter => {
-                let x_values = extract_column_values(&self.rows, &self.filtered_indices, self.chart_x_col);
-                // Match x and y by row index using zip (both are derived from filtered_indices)
-                let pairs: Vec<(f64, f64)> = x_values
-                    .into_iter()
-                    .zip(y_values.iter())
-                    .filter_map(|((ix, x), (iy, y))| {
-                        if ix == *iy { Some((x, *y)) } else { None }
-                    })
-                    .collect();
+                let pairs = extract_scatter_pairs(&self.rows, &self.filtered_indices, self.chart_x_col, self.chart_col);
                 let limited = downsample(&pairs, 500);
                 ChartData::Pairs(limited)
             }
@@ -1562,6 +1573,37 @@ mod tests {
         let rows = make_rc_rows(&[&["-3.14"], &["2.5"], &["-0.001"]]);
         let result = extract_column_values(&rows, &[0, 1, 2], 0);
         assert_eq!(result, vec![(0, -3.14), (1, 2.5), (2, -0.001)]);
+    }
+
+    // --- extract_scatter_pairs ---
+
+    #[test]
+    fn scatter_pairs_basic() {
+        let rows = make_rc_rows(&[&["1", "10"], &["2", "20"], &["3", "30"]]);
+        let result = extract_scatter_pairs(&rows, &[0, 1, 2], 0, 1);
+        assert_eq!(result, vec![(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)]);
+    }
+
+    #[test]
+    fn scatter_pairs_skips_non_numeric_in_either_column() {
+        let rows = make_rc_rows(&[&["1", "10"], &["abc", "20"], &["3", "xyz"], &["4", "40"]]);
+        let result = extract_scatter_pairs(&rows, &[0, 1, 2, 3], 0, 1);
+        // Row 1 has non-numeric X, row 2 has non-numeric Y — both skipped
+        assert_eq!(result, vec![(1.0, 10.0), (4.0, 40.0)]);
+    }
+
+    #[test]
+    fn scatter_pairs_empty_indices() {
+        let rows = make_rc_rows(&[&["1", "10"]]);
+        let result = extract_scatter_pairs(&rows, &[], 0, 1);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn scatter_pairs_filters_nan_infinity() {
+        let rows = make_rc_rows(&[&["1", "NaN"], &["inf", "2"], &["3", "4"]]);
+        let result = extract_scatter_pairs(&rows, &[0, 1, 2], 0, 1);
+        assert_eq!(result, vec![(3.0, 4.0)]);
     }
 }
 

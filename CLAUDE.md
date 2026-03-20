@@ -86,6 +86,7 @@ src/
 - **行コピーはタブ区切り** — スプレッドシートへの貼り付け互換性が最も高い
 - **`TableRow` に `Entity<CsvrApp>` を保持** — クリックハンドラから親の状態を更新するため。`Entity` は参照カウントされたハンドルなので clone コストは低い
 - **ホバーは GPUI の `.hover()` スタイルで実装** — 状態管理不要。行 div に `.id()` を付与して `StatefulInteractiveElement` にし、`.hover(|style| style.bg(...))` で背景色を変更。選択中の行ではホバーを無効化
+- **行選択時の矢印キーは非対称** — `col=None`（行全体選択）で右キー→`Some(0)` に遷移してセル選択モードに入る。左キーは `None` のまま（行選択から左に戻す意味がないため）
 
 ## GPUI API（v0.188.6）
 
@@ -95,7 +96,9 @@ GPUI のドキュメントは限られている。Zed のソースコード（`~
 - `AppContext` トレイトと `Focusable` トレイトは `gpui::prelude::*` に含まれない — 明示的に `use` が必要
 - `uniform_list` はスクロールイベントを親に伝播しない（`cx.stop_propagation()` が無条件）
 - `UniformListScrollHandle` の水平オフセット取得に公開 API がない — 内部フィールドへの直接アクセスが必要（`h_scroll_offset()` に分離済み）
-- `overflow_x_scroll()` は `StatefulInteractiveElement` のメソッド — `div()` では先に `.id()` が必要
+- `overflow_x_scroll()` / `.hover()` は `StatefulInteractiveElement` のメソッド — `div()` では先に `.id()` が必要
+- `ElementId` は `(&str, usize)` の2要素タプルまで対応。3要素以上は `SharedString::from(format!(...))` で構築する
+- `ClickEvent` に `stop_propagation()` はない — 親子要素の `on_click` 競合は構造で回避する（クリッカブル要素のネストを避ける）
 - 非公開 API を使う場合: ヘルパーメソッドに分離 + `HACK` コメント付与 + バージョンアップ時に優先確認
 
 ## Rust Edition

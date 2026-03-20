@@ -16,6 +16,7 @@ cargo test test_name         # 単一テスト実行
 cargo clippy                 # lint
 cargo build --release        # リリースビルド
 cargo tarpaulin --skip-clean --out stdout  # カバレッジ計測
+./scripts/screenshot.sh              # README用スクリーンショット撮影（要: Accessibility許可 / 表示環境）
 ```
 
 ## ビルド前提条件
@@ -177,7 +178,7 @@ GitHub Actions は macOS ランナー（`macos-latest`）で実行。GPUI が Me
 
 ### レイアウトの設計判断
 
-- **行の最小幅にビューポート幅を使用** — `TableRow` に `min_row_width`（`window.viewport_size().width`）を渡し、`min_w(px(...))` を設定。カラム数が少ない場合でも行背景がウィンドウ端まで伸びる。カラム合計幅がビューポートを超える場合は `min_w` が無効化され、通常の横スクロールになる
+- **行の最小幅にビューポート幅を使用** — `TableRow` に `min_row_width: gpui::Pixels`（`window.viewport_size().width`）を渡し、`min_w(self.min_row_width)` を設定。カラム数が少ない場合でも行背景がウィンドウ端まで伸びる。カラム合計幅がビューポートを超える場合は `min_w` が無効化され、通常の横スクロールになる
 - **`uniform_list` + `Unconstrained` では `flex_1` フィラーが効かない** — 各行の幅はコンテンツで決まるため、`flex_1` は伸びる余地がない。明示的な `min_w` 指定が必要
 
 ## 実装済み機能

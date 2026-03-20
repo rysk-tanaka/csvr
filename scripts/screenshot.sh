@@ -18,13 +18,13 @@ fi
 # Validate wait-time variables
 # WAIT_LAUNCH must be an integer (used in arithmetic expansion)
 if ! [[ "$WAIT_LAUNCH" =~ ^[0-9]+$ ]]; then
-  echo "error: WAIT_LAUNCH must be a positive integer, got '$WAIT_LAUNCH'" >&2
+  echo "error: WAIT_LAUNCH must be a non-negative integer, got '$WAIT_LAUNCH'" >&2
   exit 1
 fi
 # WAIT_ACTION and WAIT_SHORT may be decimals (passed to sleep)
 for var_name in WAIT_ACTION WAIT_SHORT; do
   val="${!var_name}"
-  if ! [[ "$val" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+  if ! [[ "$val" =~ ^[0-9]*\.?[0-9]+$ ]]; then
     echo "error: $var_name must be a non-negative number, got '$val'" >&2
     exit 1
   fi
@@ -64,19 +64,22 @@ if let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) a
 send_keys() {
   local pid="$1"
   local cmd="$2"
-  local output
-  if ! output=$(osascript -e "
+  local stderr_file
+  stderr_file=$(mktemp)
+  if ! osascript -e "
     tell application \"System Events\"
       tell (first process whose unix id is $pid)
         set frontmost to true
         $cmd
       end tell
     end tell
-  " 2>&1); then
+  " 2>"$stderr_file" >/dev/null; then
     echo "error: osascript failed (Accessibility permission may be missing)" >&2
-    echo "  output: $output" >&2
+    echo "  output: $(cat "$stderr_file")" >&2
+    rm -f "$stderr_file"
     exit 1
   fi
+  rm -f "$stderr_file"
 }
 
 capture() {
@@ -122,7 +125,7 @@ echo "==> Launching csvr..."
 APP_PID=$!
 
 # Poll until the window appears or timeout
-deadline=$(( $(date +%s) + WAIT_LAUNCH ))
+deadline=$(( $(date +%s) + 10#$WAIT_LAUNCH ))
 WID=""
 while :; do
   if ! kill -0 "$APP_PID" 2>/dev/null; then

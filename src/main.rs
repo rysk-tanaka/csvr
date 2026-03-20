@@ -556,7 +556,9 @@ fn draw_chart(
                 match path.build() {
                     Ok(path) => window.paint_path(path, rgb(CHART_GREEN)),
                     Err(e) => {
-                        eprintln!("Warning: failed to build line chart path: {e:?}");
+                        if cfg!(debug_assertions) {
+                            eprintln!("Warning: failed to build line chart path: {e:?}");
+                        }
                     }
                 }
             }

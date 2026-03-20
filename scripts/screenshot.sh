@@ -10,10 +10,17 @@ WAIT_LAUNCH="${WAIT_LAUNCH:-10}"
 WAIT_ACTION="${WAIT_ACTION:-1}"
 WAIT_SHORT="${WAIT_SHORT:-0.5}"
 
+if [[ "$(uname)" != "Darwin" ]]; then
+  echo "error: this script requires macOS" >&2
+  exit 1
+fi
+
 # --- helpers ---
 
 get_window_id() {
   local pid="$1"
+  local stderr_file
+  stderr_file=$(mktemp)
   local output
   if ! output=$(swift -e "
 import CoreGraphics
@@ -28,11 +35,13 @@ if let list = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) a
         }
     }
 }
-" 2>&1); then
+" 2>"$stderr_file"); then
     echo "error: swift failed. Is Xcode installed?" >&2
-    echo "  output: $output" >&2
+    echo "  output: $(cat "$stderr_file")" >&2
+    rm -f "$stderr_file"
     return 1
   fi
+  rm -f "$stderr_file"
   echo "$output"
 }
 

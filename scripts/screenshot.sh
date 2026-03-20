@@ -6,7 +6,7 @@ PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 BINARY="$PROJECT_DIR/target/release/csvr"
 SAMPLE_CSV="$PROJECT_DIR/examples/sample.csv"
 OUTPUT_DIR="$PROJECT_DIR/docs/images"
-WAIT_LAUNCH=3
+WAIT_LAUNCH=10
 WAIT_ACTION=1
 WAIT_SHORT=0.5
 
@@ -41,7 +41,7 @@ send_keys() {
   local output
   if ! output=$(osascript -e "
     tell application \"System Events\"
-      tell process \"csvr\"
+      tell (first process whose unix id is $APP_PID)
         set frontmost to true
         $1
       end tell
@@ -97,7 +97,10 @@ while :; do
     echo "error: csvr (PID $APP_PID) crashed during launch" >&2
     exit 1
   fi
-  WID=$(get_window_id "$APP_PID" || true)
+  WID=$(get_window_id "$APP_PID") || {
+    echo "error: failed to query window list (swift error)" >&2
+    exit 1
+  }
   if [[ -n "$WID" ]]; then
     break
   fi

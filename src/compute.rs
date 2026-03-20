@@ -156,6 +156,49 @@ pub(crate) fn extract_scatter_pairs(
         .collect()
 }
 
+/// Summary statistics for a numeric column.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ColumnStats {
+    pub(crate) count: usize,
+    pub(crate) sum: f64,
+    pub(crate) min: f64,
+    pub(crate) max: f64,
+    pub(crate) mean: f64,
+}
+
+/// Compute summary statistics for a numeric column over the given row indices.
+/// Single-pass: parses each value once and accumulates count/sum/min/max.
+/// Returns `None` if no finite numeric values exist.
+pub(crate) fn compute_column_stats(
+    rows: &[Rc<Vec<String>>],
+    indices: &[usize],
+    col: usize,
+) -> Option<ColumnStats> {
+    let mut count: usize = 0;
+    let mut sum: f64 = 0.0;
+    let mut min: f64 = f64::INFINITY;
+    let mut max: f64 = f64::NEG_INFINITY;
+
+    for &row_idx in indices {
+        let v = rows.get(row_idx)
+            .and_then(|row| row.get(col))
+            .and_then(|cell| cell.parse::<f64>().ok())
+            .filter(|v| v.is_finite());
+        if let Some(v) = v {
+            count += 1;
+            sum += v;
+            if v < min { min = v; }
+            if v > max { max = v; }
+        }
+    }
+
+    if count == 0 {
+        return None;
+    }
+    let mean = sum / count as f64;
+    Some(ColumnStats { count, sum, min, max, mean })
+}
+
 /// Compute histogram bin counts for the given values.
 pub(crate) fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<usize> {
     if values.is_empty() || bin_count == 0 {
@@ -671,5 +714,59 @@ mod tests {
         let rows = make_rc_rows(&[&["1", "NaN"], &["inf", "2"], &["3", "4"]]);
         let result = extract_scatter_pairs(&rows, &[0, 1, 2], 0, 1);
         assert_eq!(result, vec![(3.0, 4.0)]);
+    }
+
+    // --- compute_column_stats ---
+
+    #[test]
+    fn column_stats_basic() {
+        let rows = make_rc_rows(&[&["10"], &["20"], &["30"]]);
+        let stats = compute_column_stats(&rows, &[0, 1, 2], 0).unwrap();
+        assert_eq!(stats.count, 3);
+        assert!((stats.sum - 60.0).abs() < f64::EPSILON);
+        assert!((stats.min - 10.0).abs() < f64::EPSILON);
+        assert!((stats.max - 30.0).abs() < f64::EPSILON);
+        assert!((stats.mean - 20.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn column_stats_single_value() {
+        let rows = make_rc_rows(&[&["42"]]);
+        let stats = compute_column_stats(&rows, &[0], 0).unwrap();
+        assert_eq!(stats.count, 1);
+        assert!((stats.sum - 42.0).abs() < f64::EPSILON);
+        assert!((stats.min - 42.0).abs() < f64::EPSILON);
+        assert!((stats.max - 42.0).abs() < f64::EPSILON);
+        assert!((stats.mean - 42.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn column_stats_skips_non_numeric() {
+        let rows = make_rc_rows(&[&["10"], &["abc"], &["30"]]);
+        let stats = compute_column_stats(&rows, &[0, 1, 2], 0).unwrap();
+        assert_eq!(stats.count, 2);
+        assert!((stats.sum - 40.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn column_stats_no_numeric_values() {
+        let rows = make_rc_rows(&[&["abc"], &["def"]]);
+        assert!(compute_column_stats(&rows, &[0, 1], 0).is_none());
+    }
+
+    #[test]
+    fn column_stats_empty_indices() {
+        let rows = make_rc_rows(&[&["10"]]);
+        assert!(compute_column_stats(&rows, &[], 0).is_none());
+    }
+
+    #[test]
+    fn column_stats_respects_filtered_indices() {
+        let rows = make_rc_rows(&[&["10"], &["20"], &["30"], &["40"]]);
+        let stats = compute_column_stats(&rows, &[1, 3], 0).unwrap();
+        assert_eq!(stats.count, 2);
+        assert!((stats.sum - 60.0).abs() < f64::EPSILON);
+        assert!((stats.min - 20.0).abs() < f64::EPSILON);
+        assert!((stats.max - 40.0).abs() < f64::EPSILON);
     }
 }

@@ -123,7 +123,7 @@ pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<Vec<u8>, String>> {
     let (decoded, _, had_errors) = encoding.decode(bytes);
     if had_errors {
         return Some(Err(format!(
-            "failed to decode file: detected encoding {} produced invalid characters",
+            "failed to decode input: detected encoding {} produced invalid characters",
             encoding.name()
         )));
     }

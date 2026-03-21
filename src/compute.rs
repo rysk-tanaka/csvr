@@ -328,10 +328,11 @@ pub(crate) fn export_json(
     filtered_indices: &[usize],
     visible_col_indices: &[usize],
 ) -> String {
-    let mut out = String::from("[\n");
-    for (i, &row_idx) in filtered_indices.iter().enumerate() {
+    let mut out = String::new();
+    let mut written = 0usize;
+    for &row_idx in filtered_indices {
         let Some(row) = rows.get(row_idx) else { continue };
-        if i > 0 {
+        if written > 0 {
             out.push_str(",\n");
         }
         out.push_str("  {");
@@ -348,13 +349,16 @@ pub(crate) fn export_json(
             ));
         }
         out.push('}');
+        written += 1;
     }
-    out.push_str("\n]\n");
-    out
+    if written == 0 {
+        return "[]\n".to_string();
+    }
+    format!("[\n{}\n]\n", out)
 }
 
 fn escape_markdown_cell(s: &str) -> String {
-    s.replace('|', "\\|").replace('\n', " ")
+    s.replace('|', "\\|").replace(['\n', '\r'], " ")
 }
 
 /// Export visible data as GitHub-flavored Markdown table.
@@ -1098,7 +1102,7 @@ mod tests {
     fn export_json_empty_rows() {
         let rows = make_rc_rows(&[&["a"]]);
         let result = export_json(&["col".into()], &rows, &[], &[0]);
-        assert_eq!(result, "[\n\n]\n");
+        assert_eq!(result, "[]\n");
     }
 
     #[test]
@@ -1225,6 +1229,28 @@ mod tests {
             &rows, &[0], &[],
         );
         assert_eq!(result, "|\n|\n|\n");
+    }
+
+    #[test]
+    fn export_json_out_of_bounds_first() {
+        // When the first filtered index is out of bounds, the written counter
+        // prevents a leading comma from appearing in the output.
+        let rows = make_rc_rows(&[&["Alice"]]);
+        let result = export_json(
+            &["name".into()],
+            &rows, &[99, 0], &[0],
+        );
+        assert_eq!(result, "[\n  {\"name\": \"Alice\"}\n]\n");
+    }
+
+    #[test]
+    fn export_markdown_cr_in_cell() {
+        let rows = make_rc_rows(&[&["line1\r\nline2"]]);
+        let result = export_markdown(
+            &["val".into()],
+            &rows, &[0], &[0],
+        );
+        assert!(result.contains("| line1  line2 |"));
     }
 
 }

@@ -507,7 +507,8 @@ impl CsvrApp {
     fn toggle_col_filter(&mut self) {
         self.col_filter_active = !self.col_filter_active;
         if self.col_filter_active {
-            self.col_filter_error = false;
+            // Revalidate so error flag matches the current pattern
+            self.recompute_visible_columns();
         }
     }
 
@@ -551,16 +552,18 @@ impl CsvrApp {
     }
 
     fn confirm_pin_input(&mut self) {
-        if !self.pin_input_query.is_empty() {
+        let max = self.visible_col_indices.len();
+        self.pinned_col_count = if self.pin_input_query.is_empty() {
+            // Empty input resets pinning to 0
+            0
+        } else {
             // Input is restricted to ASCII digits by the key handler, so parse only
             // fails on overflow (e.g. 99999999999999999999). Clamp to max in that case.
-            let max = self.visible_col_indices.len();
-            self.pinned_col_count = self
-                .pin_input_query
+            self.pin_input_query
                 .parse::<usize>()
                 .unwrap_or(max)
-                .min(max);
-        }
+                .min(max)
+        };
         self.pin_input_active = false;
         self.pin_input_query.clear();
     }
@@ -575,7 +578,8 @@ impl CsvrApp {
     fn toggle_row_filter(&mut self) {
         self.row_filter_active = !self.row_filter_active;
         if self.row_filter_active {
-            self.row_filter_error = false;
+            // Revalidate so error flag matches the current pattern
+            self.recompute_filtered_indices();
         }
     }
 

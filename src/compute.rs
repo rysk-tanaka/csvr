@@ -203,7 +203,13 @@ pub(crate) fn compute_column_stats(
     let count = values.len();
     let mean = sum / count as f64;
 
-    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
+    // Sample standard deviation (Bessel's correction: divide by n-1).
+    // For count == 1, variance is 0.0 (no spread in a single observation).
+    let variance = if count == 1 {
+        0.0
+    } else {
+        values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (count - 1) as f64
+    };
     let stddev = variance.sqrt();
 
     values.sort_by(|a, b| a.total_cmp(b));
@@ -805,8 +811,8 @@ mod tests {
         assert!((stats.max - 30.0).abs() < f64::EPSILON);
         assert!((stats.mean - 20.0).abs() < f64::EPSILON);
         assert!((stats.median - 20.0).abs() < f64::EPSILON);
-        // stddev of [10, 20, 30]: sqrt(((10-20)^2 + (20-20)^2 + (30-20)^2) / 3) = sqrt(200/3)
-        assert!((stats.stddev - (200.0_f64 / 3.0).sqrt()).abs() < 1e-10);
+        // Sample stddev of [10, 20, 30]: sqrt(((10-20)^2 + (20-20)^2 + (30-20)^2) / 2) = sqrt(100) = 10
+        assert!((stats.stddev - 10.0).abs() < 1e-10);
     }
 
     #[test]

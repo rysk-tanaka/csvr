@@ -44,68 +44,18 @@ src/
 ```
 
 1. **データ層** (`data.rs`) — `CsvData` が CSV パースを担当。`csv` クレートで `std::io::Read` から読み込み、ヘッダーと行データを `Vec<String>` で保持。`ChartType`, `SortDirection`, `ChartData` の型定義
-2. **計算層** (`compute.rs`) — テスト可能な純粋関数群。列幅算出、行フィルタリング、数値列判定、ソート、チャート用データ抽出・ダウンサンプリング・ヒストグラムビン計算・列統計（`ColumnStats`）など
+2. **計算層** (`compute.rs`) — テスト可能な純粋関数群。列幅算出、行フィルタリング（部分一致・正規表現）、数値列判定、ソート、列フィルタ（正規表現で列名マッチ）、チャート用データ抽出・ダウンサンプリング・ヒストグラムビン計算・列統計（`ColumnStats`: count/sum/min/max/mean/median/stddev）など
 3. **チャート描画** (`chart.rs`) — `draw_chart` 関数。GPUI の `canvas` 要素の paint コールバックから呼ばれる
 4. **UI 層** (`app.rs`) — `CsvrApp`（`Render` トレイト実装）がメインビュー。`TableRow`（`RenderOnce` / `IntoElement`）が個別行。本体は `uniform_list` による仮想スクロール
 
 入力の流れ: `load_csv()`（CLI引数 or stdin） → `CsvData` → `CsvrApp::new(data, cx)` → GPUI ウィンドウ
 
-### 状態変更パターン
+## .claude/rules
 
-`CsvrApp` の状態変更は専用メソッドに集約し、関連する副作用（フィルタ再計算、スクロールリセット等）の呼び忘れを防ぐ。
+ソースファイル編集時に自動ロードされるルールファイル:
 
-- `set_search_query()` — クエリ変更 + `filtered_indices` 再計算 + スクロール先頭リセット
-- `toggle_search()` / `close_search()` — 検索状態の切り替え。`close_search` はクエリクリアを含む
-- `toggle_sort(col)` — ソート状態サイクル（None → Asc → Desc → None）+ `recompute_filtered_indices` + スクロール先頭リセット
-- `recompute_filtered_indices()` — フィルタ → ソートを一貫適用 + 選択クリア。`set_search_query` と `toggle_sort` から呼ばれる
-- `select_cell(filtered_idx, col)` — セル選択。`col=None` で行全体選択
-- `clear_selection()` — 選択解除（Escape で呼ばれる）
-- `move_selection(row_delta, col_delta)` — 矢印キーによるカーソル移動 + `ensure_visible` で自動スクロール
-- `copy_selection(cx)` — 選択中のセル値（またはタブ区切り行）をクリップボードにコピー（`Cmd+C`）
-- `toggle_chart()` — チャートパネルの表示/非表示切替（`Cmd+G`）
-- `set_chart_type(ct)` — チャートタイプ変更（Bar / Line / Scatter / Histogram）
-- `set_chart_col(col)` / `set_chart_x_col(col)` — チャート対象列の変更（数値列のみ）+ `recompute_chart_data`
-- `recompute_chart_data()` — `chart_data_cache` を再計算。`toggle_chart`、`set_chart_type`、`set_chart_col`、`set_chart_x_col`、`recompute_filtered_indices` から呼ばれる
-
-### ステータスバーの設計判断
-
-- **統計は `column_stats_cache` にキャッシュ** — `chart_data_cache` と同様のパターン。`select_cell` / `recompute_filtered_indices` 時にのみ `recompute_column_stats()` で再計算。`render()` ではキャッシュを参照するだけ（ホバーやリサイズによる再描画で O(n) 計算が走るのを防ぐ）
-- **単一パスで統計計算** — `compute_column_stats` は `extract_column_values` の中間 Vec を介さず、直接 indices をイテレートして count/sum/min/max を一度に算出
-- **表示フォーマット** — 整数値は小数点なし、それ以外は小数4桁。`format_stat()` ヘルパーで統一。閾値は f64 仮数部の精度限界（2^53 ≈ 9.0e15）
-
-### ソートの設計判断
-
-- **数値列判定は全行ベース** — `compute_numeric_columns` は初期化時に全行をスキャン。フィルタ状態で比較モードが変わるのを防ぐため
-- **`f64::total_cmp` を使用** — `partial_cmp` は NaN で `None` を返し全順序を満たさないため。`total_cmp` は NaN に対しても決定的な順序を保証（正の NaN は最大値側に配置）。パース失敗時は `NEG_INFINITY` にフォールバックし最小値側に配置
-- **ソートキーは事前計算** — 数値モード時は `Vec<(usize, f64)>` を構築してからソート。`sort_by` 内での O(n log n) 回のパースを回避
-
-### チャートの設計判断
-
-- **`canvas` 要素で描画** — GPUI の `canvas` は prepaint/paint 2段階のレンダリング。`ChartData` は `chart_data_cache` に保持し、状態変更時のみ `recompute_chart_data()` で再計算。`render()` ではキャッシュを clone して `move` クロージャに渡す
-- **ダウンサンプリング** — Bar: 100点、Line/Scatter: 500点に均等間引きで制限。大量データ時のパフォーマンスを確保
-- **Scatter の X/Y マッチング** — `extract_scatter_pairs` で1回のイテレーションで両列を同時に抽出。両方の列に有効な数値がある行のみプロット
-- **ゼロ除算防止** — Bar/Line/Scatter では全値同一（range == 0）の場合 range を 1.0 にフォールバック。Histogram では全値を中央ビンに配置
-
-### セル選択の設計判断
-
-- **選択インデックスは `filtered_indices` ベース** — 表示上の位置と一致させることで矢印キー移動が直感的に動作。フィルタ/ソート変更時に `recompute_filtered_indices` で選択をクリアし不整合を防ぐ
-- **行コピーはタブ区切り** — スプレッドシートへの貼り付け互換性が最も高い
-- **`TableRow` に `Entity<CsvrApp>` を保持** — クリックハンドラから親の状態を更新するため。`Entity` は参照カウントされたハンドルなので clone コストは低い
-- **ホバーは GPUI の `.hover()` スタイルで実装** — 状態管理不要。行 div に `.id()` を付与して `StatefulInteractiveElement` にし、`.hover(|style| style.bg(...))` で背景色を変更。選択中の行ではホバーを無効化
-- **行選択時の矢印キーは非対称** — `col=None`（行全体選択）で右キー→`Some(0)` に遷移してセル選択モードに入る。左キーは `None` のまま（行選択から左に戻す意味がないため）
-
-## GPUI API（v0.188.6）
-
-GPUI のドキュメントは限られている。Zed のソースコード（`~/.cargo/git/checkouts/zed-*/` 以下）が最も信頼できるリファレンス。
-詳細なコード例・パターン集は `.claude/rules/gpui.md` に配置（`src/**/*.rs` 操作時に自動ロード）。以下は特に重要な注意点：
-
-- `AppContext` トレイトと `Focusable` トレイトは `gpui::prelude::*` に含まれない — 明示的に `use` が必要
-- `uniform_list` はスクロールイベントを親に伝播しない（`cx.stop_propagation()` が無条件）
-- `UniformListScrollHandle` の水平オフセット取得に公開 API がない — 内部フィールドへの直接アクセスが必要（`h_scroll_offset()` に分離済み）
-- `overflow_x_scroll()` / `.hover()` は `StatefulInteractiveElement` のメソッド — `div()` では先に `.id()` が必要
-- `ElementId` は `(&str, usize)` の2要素タプルまで対応。3要素以上は `SharedString::from(format!(...))` で構築する
-- `ClickEvent` に `stop_propagation()` はない — 親子要素の `on_click` 競合は構造で回避する（クリッカブル要素のネストを避ける）
-- 非公開 API を使う場合: ヘルパーメソッドに分離 + `HACK` コメント付与 + バージョンアップ時に優先確認
+- `gpui.md` (`src/**/*.rs`) — GPUI API のパターン集・注意点・型対応表
+- `design.md` (`src/**/*.rs`) — 状態変更パターン・各機能の設計判断
 
 ## Rust Edition
 
@@ -120,8 +70,3 @@ GitHub Actions は macOS ランナー（`macos-latest`）で実行。GPUI が Me
 - GPUI レンダリング（`Render`/`RenderOnce` 実装）はウィンドウ環境が必要なためユニットテスト対象外
 - `load_csv` は stdin/プロセス終了に依存するためユニットテスト対象外
 - データ処理・レイアウト計算の純粋関数をテスト対象とする（テストは `data.rs` と `compute.rs` に配置）
-
-### レイアウトの設計判断
-
-- **行の最小幅にビューポート幅を使用** — `TableRow` に `min_row_width: gpui::Pixels`（`window.viewport_size().width`）を渡し、`min_w(self.min_row_width)` を設定。カラム数が少ない場合でも行背景がウィンドウ端まで伸びる。カラム合計幅がビューポートを超える場合は `min_w` が無効化され、通常の横スクロールになる
-- **`uniform_list` + `Unconstrained` では `flex_1` フィラーが効かない** — 各行の幅はコンテンツで決まるため、`flex_1` は伸びる余地がない。明示的な `min_w` 指定が必要

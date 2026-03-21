@@ -3,17 +3,17 @@ mod chart;
 mod compute;
 mod data;
 
-use std::io::BufReader;
+use std::io::Cursor;
 use std::io::IsTerminal;
 
 use gpui::{App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 
-use crate::app::{CopySelection, CsvrApp, DismissSearch, ToggleChart, ToggleSearch};
-use crate::data::CsvData;
+use crate::app::{CopySelection, CsvrApp, DismissSearch, ExportJson, ExportMarkdown, ToggleChart, ToggleSearch};
+use crate::data::{CsvData, decode_to_utf8};
 
 fn print_usage_and_exit(msg: &str) -> ! {
     eprintln!("Error: {}", msg);
-    eprintln!("Usage: csvr <file.csv>");
+    eprintln!("Usage: csvr <file>");
     eprintln!("   or: cat file.csv | csvr");
     std::process::exit(1);
 }
@@ -27,20 +27,54 @@ fn load_csv() -> CsvData {
     }
     if args.len() == 2 {
         let path = &args[1];
-        let file = std::fs::File::open(path).unwrap_or_else(|e| {
+        let is_spreadsheet = std::path::Path::new(path)
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx") || ext.eq_ignore_ascii_case("xls"));
+
+        if is_spreadsheet {
+            return CsvData::from_xlsx(path).unwrap_or_else(|e| {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            });
+        }
+
+        let bytes = std::fs::read(path).unwrap_or_else(|e| {
             eprintln!("Error: cannot open '{}': {}", path, e);
             std::process::exit(1);
         });
-        return CsvData::from_reader(file).unwrap_or_else(|e| {
-            eprintln!("Error: failed to parse CSV '{}': {}", path, e);
+        // Reuse the original buffer when already UTF-8; allocate a new one only when transcoding is needed
+        let transcoded = match decode_to_utf8(&bytes) {
+            Some(Ok(t)) => t,
+            Some(Err(e)) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+            None => bytes,
+        };
+        return CsvData::from_reader(Cursor::new(transcoded)).unwrap_or_else(|e| {
+            eprintln!("Error: failed to parse '{}': {}", path, e);
+            eprintln!("Supported formats: .csv, .xlsx, .xls");
             std::process::exit(1);
         });
     }
 
-    // Fall back to stdin when piped (BufReader streams without loading entire input into memory)
+    // Fall back to stdin when piped
     if !std::io::stdin().is_terminal() {
-        let reader = BufReader::new(std::io::stdin().lock());
-        return CsvData::from_reader(reader).unwrap_or_else(|e| {
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut std::io::stdin().lock(), &mut bytes).unwrap_or_else(|e| {
+            eprintln!("Error: failed to read from stdin: {}", e);
+            std::process::exit(1);
+        });
+        let transcoded = match decode_to_utf8(&bytes) {
+            Some(Ok(t)) => t,
+            Some(Err(e)) => {
+                eprintln!("Error: {}", e);
+                std::process::exit(1);
+            }
+            None => bytes,
+        };
+        return CsvData::from_reader(Cursor::new(transcoded)).unwrap_or_else(|e| {
             eprintln!("Error: failed to parse CSV from stdin: {}", e);
             std::process::exit(1);
         });
@@ -57,6 +91,8 @@ fn main() {
             KeyBinding::new("escape", DismissSearch, Some("CsvrApp")),
             KeyBinding::new("cmd-g", ToggleChart, Some("CsvrApp")),
             KeyBinding::new("cmd-c", CopySelection, Some("CsvrApp")),
+            KeyBinding::new("cmd-shift-j", ExportJson, Some("CsvrApp")),
+            KeyBinding::new("cmd-shift-m", ExportMarkdown, Some("CsvrApp")),
         ]);
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(

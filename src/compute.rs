@@ -303,6 +303,94 @@ pub(crate) fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<us
     bins
 }
 
+fn escape_json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// Export visible data as JSON (array of objects).
+pub(crate) fn export_json(
+    headers: &[String],
+    rows: &[Rc<Vec<String>>],
+    filtered_indices: &[usize],
+    visible_col_indices: &[usize],
+) -> String {
+    let mut out = String::from("[\n");
+    for (i, &row_idx) in filtered_indices.iter().enumerate() {
+        let Some(row) = rows.get(row_idx) else { continue };
+        if i > 0 {
+            out.push_str(",\n");
+        }
+        out.push_str("  {");
+        for (j, &col_idx) in visible_col_indices.iter().enumerate() {
+            if j > 0 {
+                out.push_str(", ");
+            }
+            let key = headers.get(col_idx).map_or("", |s| s.as_str());
+            let val = row.get(col_idx).map_or("", |s| s.as_str());
+            out.push_str(&format!(
+                "\"{}\": \"{}\"",
+                escape_json_string(key),
+                escape_json_string(val)
+            ));
+        }
+        out.push('}');
+    }
+    out.push_str("\n]\n");
+    out
+}
+
+fn escape_markdown_cell(s: &str) -> String {
+    s.replace('|', "\\|").replace('\n', " ")
+}
+
+/// Export visible data as GitHub-flavored Markdown table.
+pub(crate) fn export_markdown(
+    headers: &[String],
+    rows: &[Rc<Vec<String>>],
+    filtered_indices: &[usize],
+    visible_col_indices: &[usize],
+) -> String {
+    let mut out = String::new();
+    // Header row
+    out.push('|');
+    for &col_idx in visible_col_indices {
+        let h = headers.get(col_idx).map_or("", |s| s.as_str());
+        out.push_str(&format!(" {} |", escape_markdown_cell(h)));
+    }
+    out.push('\n');
+    // Separator row
+    out.push('|');
+    for _ in visible_col_indices {
+        out.push_str(" --- |");
+    }
+    out.push('\n');
+    // Data rows
+    for &row_idx in filtered_indices {
+        let Some(row) = rows.get(row_idx) else { continue };
+        out.push('|');
+        for &col_idx in visible_col_indices {
+            let val = row.get(col_idx).map_or("", |s| s.as_str());
+            out.push_str(&format!(" {} |", escape_markdown_cell(val)));
+        }
+        out.push('\n');
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -981,6 +1069,162 @@ mod tests {
         let indices = vec![0, 1];
         let result = filter_rows_regex(&rows, &indices, "Tokyo", Some(99)).unwrap();
         assert_eq!(result, Vec::<usize>::new());
+    }
+
+    // --- export_json ---
+
+    #[test]
+    fn export_json_basic() {
+        let rows = make_rc_rows(&[&["Alice", "30"], &["Bob", "25"]]);
+        let result = export_json(
+            &["name".into(), "age".into()],
+            &rows, &[0, 1], &[0, 1],
+        );
+        assert_eq!(result, "[\n  {\"name\": \"Alice\", \"age\": \"30\"},\n  {\"name\": \"Bob\", \"age\": \"25\"}\n]\n");
+    }
+
+    #[test]
+    fn export_json_special_chars() {
+        let rows = make_rc_rows(&[&["say \"hi\"", "line1\nline2"]]);
+        let result = export_json(
+            &["msg".into(), "note".into()],
+            &rows, &[0], &[0, 1],
+        );
+        assert!(result.contains("say \\\"hi\\\""));
+        assert!(result.contains("line1\\nline2"));
+    }
+
+    #[test]
+    fn export_json_empty_rows() {
+        let rows = make_rc_rows(&[&["a"]]);
+        let result = export_json(&["col".into()], &rows, &[], &[0]);
+        assert_eq!(result, "[\n\n]\n");
+    }
+
+    #[test]
+    fn export_json_visible_cols() {
+        let rows = make_rc_rows(&[&["Alice", "30", "Tokyo"]]);
+        let result = export_json(
+            &["name".into(), "age".into(), "city".into()],
+            &rows, &[0], &[0, 2],
+        );
+        assert!(result.contains("\"name\""));
+        assert!(result.contains("\"city\""));
+        assert!(!result.contains("\"age\""));
+    }
+
+    // --- export_markdown ---
+
+    #[test]
+    fn export_markdown_basic() {
+        let rows = make_rc_rows(&[&["Alice", "30"], &["Bob", "25"]]);
+        let result = export_markdown(
+            &["name".into(), "age".into()],
+            &rows, &[0, 1], &[0, 1],
+        );
+        assert_eq!(
+            result,
+            "| name | age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |\n"
+        );
+    }
+
+    #[test]
+    fn export_markdown_pipe_escape() {
+        let rows = make_rc_rows(&[&["a|b"]]);
+        let result = export_markdown(
+            &["val".into()],
+            &rows, &[0], &[0],
+        );
+        assert!(result.contains("a\\|b"));
+    }
+
+    #[test]
+    fn export_markdown_empty_rows() {
+        let rows = make_rc_rows(&[&["a"]]);
+        let result = export_markdown(&["col".into()], &rows, &[], &[0]);
+        assert_eq!(result, "| col |\n| --- |\n");
+    }
+
+    #[test]
+    fn export_markdown_visible_cols() {
+        let rows = make_rc_rows(&[&["Alice", "30", "Tokyo"]]);
+        let result = export_markdown(
+            &["name".into(), "age".into(), "city".into()],
+            &rows, &[0], &[0, 2],
+        );
+        assert!(result.contains("| name | city |"));
+        assert!(!result.contains("age"));
+    }
+
+    #[test]
+    fn export_json_control_chars() {
+        let rows = make_rc_rows(&[&["a\x00b\x08c\x1f"]]);
+        let result = export_json(
+            &["val".into()],
+            &rows, &[0], &[0],
+        );
+        assert!(result.contains("a\\u0000b\\u0008c\\u001f"));
+    }
+
+    #[test]
+    fn export_markdown_newline_in_cell() {
+        let rows = make_rc_rows(&[&["line1\nline2"]]);
+        let result = export_markdown(
+            &["val".into()],
+            &rows, &[0], &[0],
+        );
+        assert!(result.contains("| line1 line2 |"));
+    }
+
+    #[test]
+    fn export_json_out_of_bounds_index() {
+        let rows = make_rc_rows(&[&["Alice"]]);
+        let result = export_json(
+            &["name".into()],
+            &rows, &[0, 99], &[0],
+        );
+        // Row index 99 is skipped safely; only Alice appears
+        assert_eq!(result, "[\n  {\"name\": \"Alice\"}\n]\n");
+    }
+
+    #[test]
+    fn export_json_header_escape() {
+        let rows = make_rc_rows(&[&["val"]]);
+        let result = export_json(
+            &["col\"name".into()],
+            &rows, &[0], &[0],
+        );
+        assert!(result.contains("\"col\\\"name\""));
+    }
+
+    #[test]
+    fn export_markdown_header_pipe_escape() {
+        let rows = make_rc_rows(&[&["val"]]);
+        let result = export_markdown(
+            &["col|name".into()],
+            &rows, &[0], &[0],
+        );
+        assert!(result.contains("col\\|name"));
+    }
+
+    #[test]
+    fn export_json_empty_visible_cols() {
+        let rows = make_rc_rows(&[&["Alice"]]);
+        let result = export_json(
+            &["name".into()],
+            &rows, &[0], &[],
+        );
+        assert_eq!(result, "[\n  {}\n]\n");
+    }
+
+    #[test]
+    fn export_markdown_empty_visible_cols() {
+        let rows = make_rc_rows(&[&["Alice"]]);
+        let result = export_markdown(
+            &["name".into()],
+            &rows, &[0], &[],
+        );
+        assert_eq!(result, "|\n|\n|\n");
     }
 
 }

@@ -13,7 +13,8 @@ use crate::chart::{
 };
 use crate::compute::{
     ColumnStats, compute_column_stats, compute_column_widths, compute_numeric_columns,
-    compute_histogram_bins, downsample, extract_column_values, extract_scatter_pairs,
+    compute_histogram_bins, downsample, export_json, export_markdown,
+    extract_column_values, extract_scatter_pairs,
     filter_columns_by_regex, filter_rows, filter_rows_regex, parse_column_filter,
     row_number_col_width, sort_indices,
 };
@@ -21,7 +22,7 @@ use crate::data::{
     CHART_TYPES, ChartData, ChartType, CsvData, SortDirection,
 };
 
-actions!(csvr, [ToggleSearch, DismissSearch, ToggleChart, CopySelection]);
+actions!(csvr, [ToggleSearch, DismissSearch, ToggleChart, CopySelection, ExportJson, ExportMarkdown]);
 
 // Catppuccin Mocha palette
 const BG_BASE: u32 = 0x1e1e2e;
@@ -500,6 +501,22 @@ impl CsvrApp {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
+    fn export_json(&self, cx: &mut Context<Self>) {
+        let text = export_json(
+            &self.raw_headers, &self.rows,
+            &self.filtered_indices, &self.visible_col_indices,
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
+    fn export_markdown(&self, cx: &mut Context<Self>) {
+        let text = export_markdown(
+            &self.raw_headers, &self.rows,
+            &self.filtered_indices, &self.visible_col_indices,
+        );
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+    }
+
     fn numeric_col_indices(&self) -> Vec<usize> {
         self.numeric_columns
             .iter()
@@ -668,6 +685,12 @@ impl Render for CsvrApp {
             }))
             .on_action(cx.listener(|this, _: &CopySelection, _window, cx| {
                 this.copy_selection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExportJson, _window, cx| {
+                this.export_json(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ExportMarkdown, _window, cx| {
+                this.export_markdown(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
                 let keystroke = &event.keystroke;

@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## プロジェクト概要
 
-csvr — CLI から起動する読み取り専用の CSV ビューワー。GPUI（Zed の UI フレームワーク）で構築。macOS 専用。編集・保存機能はスコープ外。
+csvr — CLI から起動する読み取り専用の CSV ビューワー。GPUI（Zed の UI フレームワーク）で構築。macOS 専用。xlsx/xls 読み込みにも対応。編集・保存機能はスコープ外。
 
 ## 開発コマンド
 
@@ -14,6 +14,7 @@ printf "a,b\n1,2\n" | cargo run  # パイプ入力で実行
 cargo test                   # 全テスト実行
 cargo test test_name         # 単一テスト実行
 cargo clippy                 # lint
+cargo fmt                    # フォーマット（CI 未追加 #17、手動実行推奨）
 cargo build --release        # リリースビルド
 cargo tarpaulin --skip-clean --out stdout  # カバレッジ計測
 cargo update-licenses                # THIRD_PARTY_LICENSES.html 再生成（要: cargo-about）
@@ -43,12 +44,12 @@ src/
   app.rs       -- CsvrApp, TableRow, UIカラー定数, actions!
 ```
 
-1. **データ層** (`data.rs`) — `CsvData` が CSV パースを担当。`csv` クレートで `std::io::Read` から読み込み、ヘッダーと行データを `Vec<String>` で保持。`ChartType`, `SortDirection`, `ChartData` の型定義
-2. **計算層** (`compute.rs`) — テスト可能な純粋関数群。列幅算出、行フィルタリング（部分一致・正規表現）、数値列判定、ソート、列フィルタ（正規表現で列名マッチ）、チャート用データ抽出・ダウンサンプリング・ヒストグラムビン計算・列統計（`ColumnStats`: count/sum/min/max/mean/median/stddev — stddev は標本標準偏差）など
+1. **データ層** (`data.rs`) — `CsvData` が入力パースを担当。CSV は `csv` クレートで `std::io::Read` から読み込み、xlsx/xls は `calamine` クレートで読み込み（`from_xlsx`）。ヘッダーと行データを `Vec<String>` で保持。`decode_to_utf8` で非 UTF-8 ファイルのエンコーディング自動検出・変換（`chardetng` + `encoding_rs`）。`ChartType`, `SortDirection`, `ChartData` の型定義
+2. **計算層** (`compute.rs`) — テスト可能な純粋関数群。列幅算出、行フィルタリング（部分一致・正規表現）、数値列判定、ソート、列フィルタ（正規表現で列名マッチ）、チャート用データ抽出・ダウンサンプリング・ヒストグラムビン計算・列統計（`ColumnStats`: count/sum/min/max/mean/median/stddev — stddev は標本標準偏差）、エクスポート（`export_json` / `export_markdown` — 表示中データをクリップボードコピー用に変換）
 3. **チャート描画** (`chart.rs`) — `draw_chart` 関数。GPUI の `canvas` 要素の paint コールバックから呼ばれる
-4. **UI 層** (`app.rs`) — `CsvrApp`（`Render` トレイト実装）がメインビュー。`TableRow`（`RenderOnce` / `IntoElement`）が個別行。本体は `uniform_list` による仮想スクロール
+4. **UI 層** (`app.rs`) — `CsvrApp`（`Render` トレイト実装）がメインビュー。`TableRow`（`RenderOnce` / `IntoElement`）が個別行。本体は `uniform_list` による仮想スクロール。カラーテーマは Catppuccin Mocha（`BG_BASE`, `TEXT_MAIN` 等の定数で管理）。`/`（検索）・`*`（列フィルタ）・`f`（列固定）・`&`（行フィルタ）の入力モードは排他制御（`any_input_active()` で判定）
 
-入力の流れ: `load_csv()`（CLI引数 or stdin） → `CsvData` → `CsvrApp::new(data, cx)` → GPUI ウィンドウ
+入力の流れ: `load_csv()`（CLI引数 or stdin） → xlsx なら `CsvData::from_xlsx`、それ以外は `decode_to_utf8` → `CsvData::from_reader` → `CsvrApp::new(data, cx)` → GPUI ウィンドウ
 
 ## .claude/rules
 
@@ -70,3 +71,8 @@ GitHub Actions は macOS ランナー（`macos-latest`）で実行。GPUI が Me
 - GPUI レンダリング（`Render`/`RenderOnce` 実装）はウィンドウ環境が必要なためユニットテスト対象外
 - `load_csv` は stdin/プロセス終了に依存するためユニットテスト対象外
 - データ処理・レイアウト計算の純粋関数をテスト対象とする（テストは `data.rs` と `compute.rs` に配置）
+
+## 既知の設計トレードオフ
+
+- **エンコーディング検出とメモリ**: `load_csv` のファイル読み込みは `std::fs::read` で全量バッファリングしてからエンコーディング検出を行う。UTF-8 の場合でもファイル全体の検証が必要なため、ストリーミング読み込みとの両立が課題。ピークメモリ最適化は #21 で別途対応予定
+- **`decode_to_utf8` の `Some(Err)` パス**: `encoding_rs` の `had_errors == true` は検出エンコーディングで無効なバイト列がある場合に発生するが、`chardetng` は短いバイト列を Windows-1252 等の全バイト値を許容するエンコーディングに推定しやすい。そのため `Some(Err)` パスをテストで確実にトリガーする入力が作りにくく、`decode_non_utf8_attempts_transcoding` テストは「panic しないこと」と「`Some` が返ること」のみを保証する

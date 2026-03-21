@@ -514,12 +514,16 @@ impl CsvrApp {
     fn toggle_col_filter(&mut self) {
         self.col_filter_active = !self.col_filter_active;
         if self.col_filter_active {
-            // Revalidate error flag without clearing selection (pattern hasn't changed)
-            self.col_filter_error = filter_columns_by_regex(
-                &self.raw_headers,
-                &self.col_filter_query,
-            )
-            .is_err();
+            // Revalidate error flag without clearing selection or scanning headers.
+            // Only check if the pattern compiles.
+            if !self.col_filter_query.is_empty() {
+                self.col_filter_error = RegexBuilder::new(&self.col_filter_query)
+                    .case_insensitive(true)
+                    .build()
+                    .is_err();
+            } else {
+                self.col_filter_error = false;
+            }
         }
     }
 

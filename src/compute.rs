@@ -1,5 +1,7 @@
 use std::rc::Rc;
 
+use regex::RegexBuilder;
+
 use crate::data::{CsvData, SortDirection};
 
 /// Pixel width per character (monospace approximation at text_sm)
@@ -164,17 +166,19 @@ pub(crate) struct ColumnStats {
     pub(crate) min: f64,
     pub(crate) max: f64,
     pub(crate) mean: f64,
+    pub(crate) median: f64,
+    pub(crate) stddev: f64,
 }
 
 /// Compute summary statistics for a numeric column over the given row indices.
-/// Single-pass: parses each value once and accumulates count/sum/min/max.
+/// Collects values into a Vec for median (requires sorting) and stddev (two-pass).
 /// Returns `None` if no finite numeric values exist.
 pub(crate) fn compute_column_stats(
     rows: &[Rc<Vec<String>>],
     indices: &[usize],
     col: usize,
 ) -> Option<ColumnStats> {
-    let mut count: usize = 0;
+    let mut values: Vec<f64> = Vec::new();
     let mut sum: f64 = 0.0;
     let mut min: f64 = f64::INFINITY;
     let mut max: f64 = f64::NEG_INFINITY;
@@ -185,19 +189,92 @@ pub(crate) fn compute_column_stats(
             .and_then(|cell| cell.parse::<f64>().ok())
             .filter(|v| v.is_finite());
         if let Some(v) = v {
-            count += 1;
+            values.push(v);
             sum += v;
             if v < min { min = v; }
             if v > max { max = v; }
         }
     }
 
-    if count == 0 {
+    if values.is_empty() {
         return None;
     }
+
+    let count = values.len();
     let mean = sum / count as f64;
-    Some(ColumnStats { count, sum, min, max, mean })
+
+    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / count as f64;
+    let stddev = variance.sqrt();
+
+    values.sort_by(|a, b| a.total_cmp(b));
+    let median = if count % 2 == 1 {
+        values[count / 2]
+    } else {
+        (values[count / 2 - 1] + values[count / 2]) / 2.0
+    };
+
+    Some(ColumnStats { count, sum, min, max, mean, median, stddev })
 }
+
+/// Return indices of columns whose header matches the regex pattern (case-insensitive).
+/// Empty pattern returns all column indices.
+pub(crate) fn filter_columns_by_regex(
+    headers: &[String],
+    pattern: &str,
+) -> Result<Vec<usize>, regex::Error> {
+    if pattern.is_empty() {
+        return Ok((0..headers.len()).collect());
+    }
+    let re = RegexBuilder::new(pattern).case_insensitive(true).build()?;
+    Ok(headers
+        .iter()
+        .enumerate()
+        .filter(|(_, h)| re.is_match(h))
+        .map(|(i, _)| i)
+        .collect())
+}
+
+/// Parse column filter query: "col:pattern" returns (Some(col_index), pattern),
+/// plain "pattern" returns (None, pattern). If col name doesn't match any header,
+/// treats the whole string as a global pattern.
+pub(crate) fn parse_column_filter(
+    query: &str,
+    headers: &[String],
+) -> (Option<usize>, String) {
+    if let Some((prefix, suffix)) = query.split_once(':') {
+        let prefix_lower = prefix.to_lowercase();
+        if let Some(idx) = headers.iter().position(|h| h.to_lowercase() == prefix_lower) {
+            return (Some(idx), suffix.to_string());
+        }
+    }
+    (None, query.to_string())
+}
+
+/// Filter rows by regex, optionally targeting a specific column.
+/// Applies to the given subset of row indices.
+pub(crate) fn filter_rows_regex(
+    rows: &[Rc<Vec<String>>],
+    indices: &[usize],
+    pattern: &str,
+    target_col: Option<usize>,
+) -> Result<Vec<usize>, regex::Error> {
+    if pattern.is_empty() {
+        return Ok(indices.to_vec());
+    }
+    let re = RegexBuilder::new(pattern).case_insensitive(true).build()?;
+    Ok(indices
+        .iter()
+        .copied()
+        .filter(|&i| {
+            let Some(row) = rows.get(i) else { return false };
+            match target_col {
+                Some(col) => row.get(col).is_some_and(|cell| re.is_match(cell)),
+                None => row.iter().any(|cell| re.is_match(cell)),
+            }
+        })
+        .collect())
+}
+
 
 /// Compute histogram bin counts for the given values.
 pub(crate) fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<usize> {
@@ -727,6 +804,9 @@ mod tests {
         assert!((stats.min - 10.0).abs() < f64::EPSILON);
         assert!((stats.max - 30.0).abs() < f64::EPSILON);
         assert!((stats.mean - 20.0).abs() < f64::EPSILON);
+        assert!((stats.median - 20.0).abs() < f64::EPSILON);
+        // stddev of [10, 20, 30]: sqrt(((10-20)^2 + (20-20)^2 + (30-20)^2) / 3) = sqrt(200/3)
+        assert!((stats.stddev - (200.0_f64 / 3.0).sqrt()).abs() < 1e-10);
     }
 
     #[test]
@@ -738,6 +818,8 @@ mod tests {
         assert!((stats.min - 42.0).abs() < f64::EPSILON);
         assert!((stats.max - 42.0).abs() < f64::EPSILON);
         assert!((stats.mean - 42.0).abs() < f64::EPSILON);
+        assert!((stats.median - 42.0).abs() < f64::EPSILON);
+        assert!((stats.stddev - 0.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -768,5 +850,132 @@ mod tests {
         assert!((stats.sum - 60.0).abs() < f64::EPSILON);
         assert!((stats.min - 20.0).abs() < f64::EPSILON);
         assert!((stats.max - 40.0).abs() < f64::EPSILON);
+        assert!((stats.median - 30.0).abs() < f64::EPSILON); // (20+40)/2
     }
+
+    #[test]
+    fn column_stats_median_odd() {
+        let rows = make_rc_rows(&[&["5"], &["1"], &["3"], &["4"], &["2"]]);
+        let stats = compute_column_stats(&rows, &[0, 1, 2, 3, 4], 0).unwrap();
+        assert!((stats.median - 3.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn column_stats_median_even() {
+        let rows = make_rc_rows(&[&["4"], &["1"], &["3"], &["2"]]);
+        let stats = compute_column_stats(&rows, &[0, 1, 2, 3], 0).unwrap();
+        assert!((stats.median - 2.5).abs() < f64::EPSILON); // (2+3)/2
+    }
+
+    // --- filter_columns_by_regex ---
+
+    #[test]
+    fn filter_columns_by_regex_empty_pattern() {
+        let headers = vec!["Name".into(), "Age".into(), "City".into()];
+        let result = filter_columns_by_regex(&headers, "").unwrap();
+        assert_eq!(result, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn filter_columns_by_regex_partial_match() {
+        let headers = vec!["Name".into(), "Age".into(), "City".into()];
+        let result = filter_columns_by_regex(&headers, "a").unwrap();
+        assert_eq!(result, vec![0, 1]); // Name, Age
+    }
+
+    #[test]
+    fn filter_columns_by_regex_case_insensitive() {
+        let headers = vec!["Name".into(), "age".into(), "CITY".into()];
+        let result = filter_columns_by_regex(&headers, "AGE|city").unwrap();
+        assert_eq!(result, vec![1, 2]);
+    }
+
+    #[test]
+    fn filter_columns_by_regex_no_match() {
+        let headers = vec!["Name".into(), "Age".into()];
+        let result = filter_columns_by_regex(&headers, "zzz").unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn filter_columns_by_regex_invalid_pattern() {
+        let headers = vec!["Name".into()];
+        assert!(filter_columns_by_regex(&headers, "[invalid").is_err());
+    }
+
+    // --- parse_column_filter ---
+
+    #[test]
+    fn parse_column_filter_global() {
+        let headers = vec!["Name".into(), "City".into()];
+        let (col, pattern) = parse_column_filter("tokyo", &headers);
+        assert_eq!(col, None);
+        assert_eq!(pattern, "tokyo");
+    }
+
+    #[test]
+    fn parse_column_filter_with_col() {
+        let headers = vec!["Name".into(), "City".into()];
+        let (col, pattern) = parse_column_filter("city:tokyo", &headers);
+        assert_eq!(col, Some(1));
+        assert_eq!(pattern, "tokyo");
+    }
+
+    #[test]
+    fn parse_column_filter_unknown_col() {
+        let headers = vec!["Name".into(), "City".into()];
+        let (col, pattern) = parse_column_filter("unknown:x", &headers);
+        assert_eq!(col, None);
+        assert_eq!(pattern, "unknown:x");
+    }
+
+    // --- filter_rows_regex ---
+
+    #[test]
+    fn filter_rows_regex_basic() {
+        let rows = make_rc_rows(&[&["Tokyo"], &["Osaka"], &["Kyoto"]]);
+        let indices = vec![0, 1, 2];
+        let result = filter_rows_regex(&rows, &indices, "to", None).unwrap();
+        assert_eq!(result, vec![0, 2]); // Tokyo, Kyoto
+    }
+
+    #[test]
+    fn filter_rows_regex_column_specific() {
+        let rows = make_rc_rows(&[&["Alice", "Tokyo"], &["Bob", "Osaka"], &["Carol", "Tokyo"]]);
+        let indices = vec![0, 1, 2];
+        let result = filter_rows_regex(&rows, &indices, "tokyo", Some(1)).unwrap();
+        assert_eq!(result, vec![0, 2]);
+    }
+
+    #[test]
+    fn filter_rows_regex_empty_pattern() {
+        let rows = make_rc_rows(&[&["a"], &["b"]]);
+        let indices = vec![0, 1];
+        let result = filter_rows_regex(&rows, &indices, "", None).unwrap();
+        assert_eq!(result, vec![0, 1]);
+    }
+
+    #[test]
+    fn filter_rows_regex_invalid_pattern() {
+        let rows = make_rc_rows(&[&["a"]]);
+        assert!(filter_rows_regex(&rows, &[0], "[bad", None).is_err());
+    }
+
+    #[test]
+    fn filter_rows_regex_respects_indices() {
+        let rows = make_rc_rows(&[&["Tokyo"], &["Osaka"], &["Kyoto"]]);
+        let indices = vec![0, 1]; // only Tokyo, Osaka
+        let result = filter_rows_regex(&rows, &indices, "to", None).unwrap();
+        assert_eq!(result, vec![0]); // only Tokyo
+    }
+
+    #[test]
+    fn filter_rows_regex_out_of_range_col() {
+        // target_col=Some(99) is beyond any row's columns — should match nothing
+        let rows = make_rc_rows(&[&["Tokyo"], &["Osaka"]]);
+        let indices = vec![0, 1];
+        let result = filter_rows_regex(&rows, &indices, "Tokyo", Some(99)).unwrap();
+        assert_eq!(result, Vec::<usize>::new());
+    }
+
 }

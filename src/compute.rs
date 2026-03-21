@@ -247,11 +247,10 @@ pub(crate) fn parse_column_filter(
     query: &str,
     headers: &[String],
 ) -> (Option<usize>, String) {
-    if let Some((prefix, suffix)) = query.split_once(':') {
-        let prefix_lower = prefix.to_lowercase();
-        if let Some(idx) = headers.iter().position(|h| h.to_lowercase() == prefix_lower) {
-            return (Some(idx), suffix.to_string());
-        }
+    if let Some((prefix, suffix)) = query.split_once(':')
+        && let Some(idx) = headers.iter().position(|h| h.eq_ignore_ascii_case(prefix))
+    {
+        return (Some(idx), suffix.to_string());
     }
     (None, query.to_string())
 }

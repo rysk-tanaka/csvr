@@ -487,7 +487,12 @@ impl CsvrApp {
 
         let text = match col {
             Some(c) => row.get(c).cloned().unwrap_or_default(),
-            None => row.join("\t"),
+            None => self
+                .visible_col_indices
+                .iter()
+                .filter_map(|&c| row.get(c).cloned())
+                .collect::<Vec<_>>()
+                .join("\t"),
         };
 
         cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -507,8 +512,12 @@ impl CsvrApp {
     fn toggle_col_filter(&mut self) {
         self.col_filter_active = !self.col_filter_active;
         if self.col_filter_active {
-            // Revalidate so error flag matches the current pattern
-            self.recompute_visible_columns();
+            // Revalidate error flag without clearing selection (pattern hasn't changed)
+            self.col_filter_error = filter_columns_by_regex(
+                &self.raw_headers,
+                &self.col_filter_query,
+            )
+            .is_err();
         }
     }
 
@@ -536,10 +545,11 @@ impl CsvrApp {
             }
             Err(_) => {
                 self.col_filter_error = true;
-                // Fall back to all columns so user can see full data while fixing the pattern
+                // Fall back to all columns so user can see full data while fixing the pattern.
+                // Do NOT clear selection: fallback restores all columns, so existing
+                // selection remains valid.
                 self.visible_col_indices = Rc::new((0..self.raw_headers.len()).collect());
                 self.pinned_col_count = self.pinned_col_count.min(self.visible_col_indices.len());
-                self.clear_selection();
             }
         }
     }
@@ -578,8 +588,18 @@ impl CsvrApp {
     fn toggle_row_filter(&mut self) {
         self.row_filter_active = !self.row_filter_active;
         if self.row_filter_active {
-            // Revalidate so error flag matches the current pattern
-            self.recompute_filtered_indices();
+            // Revalidate error flag without clearing selection (pattern hasn't changed)
+            if !self.row_filter_pattern.is_empty() {
+                self.row_filter_error = filter_rows_regex(
+                    &self.rows,
+                    &self.filtered_indices,
+                    &self.row_filter_pattern,
+                    self.row_filter_col,
+                )
+                .is_err();
+            } else {
+                self.row_filter_error = false;
+            }
         }
     }
 

@@ -506,7 +506,9 @@ impl CsvrApp {
             &self.raw_headers, &self.rows,
             &self.filtered_indices, &self.visible_col_indices,
         );
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
     }
 
     fn export_markdown(&self, cx: &mut Context<Self>) {
@@ -514,7 +516,9 @@ impl CsvrApp {
             &self.raw_headers, &self.rows,
             &self.filtered_indices, &self.visible_col_indices,
         );
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        if !text.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
     }
 
     fn numeric_col_indices(&self) -> Vec<usize> {

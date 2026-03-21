@@ -368,6 +368,9 @@ pub(crate) fn export_markdown(
     filtered_indices: &[usize],
     visible_col_indices: &[usize],
 ) -> String {
+    if visible_col_indices.is_empty() {
+        return String::new();
+    }
     let mut out = String::new();
     // Header row
     out.push('|');
@@ -1228,7 +1231,7 @@ mod tests {
             &["name".into()],
             &rows, &[0], &[],
         );
-        assert_eq!(result, "|\n|\n|\n");
+        assert_eq!(result, "");
     }
 
     #[test]

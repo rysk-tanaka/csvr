@@ -34,9 +34,14 @@
 - [ ] 多フォーマット対応（Parquet/JSON 等）
 - [ ] xlsx 読み込み（calamine クレート）
 
+### G: パフォーマンス (優先度: 低)
+
+- [ ] 正規表現のコンパイル結果をキャッシュ (#19)
+
 ## インフラ
 
 - [x] CI（GitHub Actions）
 - [ ] リリースビルド・配布
 - [x] ライセンス整備（MIT LICENSE / THIRD_PARTY_LICENSES.html）
 - [ ] CI で THIRD_PARTY_LICENSES.html の同期検証 (#12)
+- [ ] CI に cargo fmt --check を追加 (#17)

@@ -1,5 +1,6 @@
 use std::{ops::Range, rc::Rc};
 
+use regex::RegexBuilder;
 use gpui::{
     App, ClipboardItem, Context, Entity, Focusable, FocusHandle, KeyDownEvent,
     ListHorizontalSizingBehavior, Render, SharedString, UniformListScrollHandle,
@@ -539,8 +540,6 @@ impl CsvrApp {
             Ok(indices) => {
                 self.col_filter_error = false;
                 self.visible_col_indices = Rc::new(indices);
-                // Clamp pinned count to visible column count
-                self.pinned_col_count = self.pinned_col_count.min(self.visible_col_indices.len());
                 // Clear selection since column positions may have changed
                 self.clear_selection();
             }
@@ -550,7 +549,6 @@ impl CsvrApp {
                 // Do NOT clear selection: fallback restores all columns, so existing
                 // selection remains valid.
                 self.visible_col_indices = Rc::new((0..self.raw_headers.len()).collect());
-                self.pinned_col_count = self.pinned_col_count.min(self.visible_col_indices.len());
             }
         }
     }
@@ -589,15 +587,13 @@ impl CsvrApp {
     fn toggle_row_filter(&mut self) {
         self.row_filter_active = !self.row_filter_active;
         if self.row_filter_active {
-            // Revalidate error flag without clearing selection (pattern hasn't changed)
+            // Revalidate error flag without clearing selection or re-scanning rows.
+            // Only check if the pattern compiles — no need to run it against all rows.
             if !self.row_filter_pattern.is_empty() {
-                self.row_filter_error = filter_rows_regex(
-                    &self.rows,
-                    &self.filtered_indices,
-                    &self.row_filter_pattern,
-                    self.row_filter_col,
-                )
-                .is_err();
+                self.row_filter_error = RegexBuilder::new(&self.row_filter_pattern)
+                    .case_insensitive(true)
+                    .build()
+                    .is_err();
             } else {
                 self.row_filter_error = false;
             }
@@ -831,7 +827,7 @@ impl Render for CsvrApp {
                     .font_weight(gpui::FontWeight::BOLD)
                     // Inner row: pinned section + scrollable section
                     .child({
-                        let pinned_count = self.pinned_col_count;
+                        let pinned_count = self.pinned_col_count.min(self.visible_col_indices.len());
 
 
                         let make_header_cell = |col_idx: usize, entity: Entity<CsvrApp>| {
@@ -1262,7 +1258,7 @@ impl Render for CsvrApp {
                                         selected_col,
                                         entity: entity_for_rows.clone(),
                                         visible_col_indices: this.visible_col_indices.clone(),
-                                        pinned_col_count: this.pinned_col_count,
+                                        pinned_col_count: this.pinned_col_count.min(this.visible_col_indices.len()),
                                         h_offset: this.h_scroll_offset(),
                                     })
                                 })

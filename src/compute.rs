@@ -328,6 +328,9 @@ pub(crate) fn export_json(
     filtered_indices: &[usize],
     visible_col_indices: &[usize],
 ) -> String {
+    if visible_col_indices.is_empty() {
+        return "[]\n".to_string();
+    }
     let mut out = String::new();
     let mut written = 0usize;
     for &row_idx in filtered_indices {
@@ -1221,7 +1224,7 @@ mod tests {
             &["name".into()],
             &rows, &[0], &[],
         );
-        assert_eq!(result, "[\n  {}\n]\n");
+        assert_eq!(result, "[]\n");
     }
 
     #[test]

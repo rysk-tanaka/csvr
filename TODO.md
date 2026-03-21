@@ -22,10 +22,10 @@
 
 ### E: 列操作 (優先度: 中)
 
-- [ ] 列の統計サマリー（min/max/mean/median/stddev）
-- [ ] 列固定（横スクロール時に左端列を固定表示）
-- [ ] 列の表示/非表示
-- [ ] カラム別フィルタ
+- [x] 列の統計サマリー（min/max/mean/median/stddev）
+- [x] 列固定（横スクロール時に左端列を固定表示）
+- [x] 列の表示/非表示
+- [x] カラム別フィルタ
 
 ### F: エクスポートと入力拡張 (優先度: 低)
 
@@ -34,9 +34,14 @@
 - [ ] 多フォーマット対応（Parquet/JSON 等）
 - [ ] xlsx 読み込み（calamine クレート）
 
+### G: パフォーマンス (優先度: 低)
+
+- [ ] 正規表現のコンパイル結果をキャッシュ (#19)
+
 ## インフラ
 
 - [x] CI（GitHub Actions）
 - [ ] リリースビルド・配布
 - [x] ライセンス整備（MIT LICENSE / THIRD_PARTY_LICENSES.html）
 - [ ] CI で THIRD_PARTY_LICENSES.html の同期検証 (#12)
+- [ ] CI に cargo fmt --check を追加 (#17)

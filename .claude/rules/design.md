@@ -22,9 +22,9 @@ paths:
 - `set_chart_col(col)` / `set_chart_x_col(col)` — チャート対象列の変更（数値列のみ）+ `recompute_chart_data`
 - `recompute_chart_data()` — `chart_data_cache` を再計算。`toggle_chart`、`set_chart_type`、`set_chart_col`、`set_chart_x_col`、`recompute_filtered_indices` から呼ばれる
 - `recompute_column_stats()` — `column_stats_cache` を再計算。`select_cell` から呼ばれる。`recompute_filtered_indices` ではキャッシュを直接 `None` にクリア
-- `toggle_col_filter()` / `set_col_filter_query()` / `close_col_filter()` — `*` コマンドによる列フィルタ。`toggle` は `recompute_visible_columns()` で再検証（エラーフラグを正確に反映）
+- `toggle_col_filter()` / `set_col_filter_query()` / `close_col_filter()` — `*` コマンドによる列フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_visible_columns()` は呼ばない）
 - `toggle_pin_input()` / `confirm_pin_input()` / `cancel_pin_input()` — `f` コマンドによる列固定。空入力で Enter → `pinned_col_count = 0`（リセット）
-- `toggle_row_filter()` / `set_row_filter_query()` / `close_row_filter()` — `&` コマンドによる行の正規表現フィルタ。`toggle` は `recompute_filtered_indices()` で再検証。`col:pattern` 構文で列指定可能
+- `toggle_row_filter()` / `set_row_filter_query()` / `close_row_filter()` — `&` コマンドによる行の正規表現フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_filtered_indices()` は呼ばない）。`col:pattern` 構文で列指定可能
 
 ## ステータスバー
 

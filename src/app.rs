@@ -98,8 +98,9 @@ impl RenderOnce for TableRow {
                 .child(text)
         };
 
-        // Pinned section: row number + pinned columns, always offset to keep row numbers fixed
-        // bg is applied to individual children (not this container) so parent hover highlight works
+        // Pinned section: row number + pinned columns, always offset to keep row numbers fixed.
+        // Each pinned cell has its own bg to cover scrollable content behind it, which means
+        // the parent hover bg does not show through on pinned cells (known GPUI trade-off).
         let pinned_div = div()
             .flex()
             .flex_row()
@@ -195,7 +196,7 @@ pub(crate) struct CsvrApp {
     pinned_col_count: usize,
     pin_input_active: bool,
     pin_input_query: String,
-    // E4: Column regex filter (`&` command)
+    // E4: Row regex filter (`&` command)
     row_filter_active: bool,
     row_filter_query: String,
     row_filter_col: Option<usize>,

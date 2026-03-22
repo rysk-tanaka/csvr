@@ -17,7 +17,7 @@ use crate::data::{CsvData, decode_to_utf8};
 
 fn print_usage_and_exit(msg: &str) -> ! {
     eprintln!("Error: {}", msg);
-    eprintln!("Usage: csvr <file>");
+    eprintln!("Usage: csvr <file.csv|file.xlsx|file.xls>");
     eprintln!("   or: cat file.csv | csvr");
     std::process::exit(1);
 }

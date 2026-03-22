@@ -18,11 +18,11 @@
 
 ## CI と品質チェック
 
-GPUI が Metal を必要とするため、macOS ランナーで実行。Cargo 実行では `--locked` フラグを使用。
+GPUI が Metal を必要とするため、macOS ランナーで実行。ただし `lint.yml` の `cargo fmt --check` は Metal 不要のため `ubuntu-latest` で実行。Cargo 実行では `--locked` フラグを使用（`cargo fmt` は `--locked` 非対応のため除く）。
 
 | Workflow | Status | 主目的 | トリガー |
 | --- | --- | --- | --- |
-| [lint.yml](./lint.yml) | [![Lint](https://github.com/rysk-tanaka/csvr/actions/workflows/lint.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/lint.yml) | `cargo clippy` の実行 | `push` (main), `pull_request` (main) |
+| [lint.yml](./lint.yml) | [![Lint](https://github.com/rysk-tanaka/csvr/actions/workflows/lint.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/lint.yml) | `cargo clippy` + `cargo fmt --check` の実行 | `push` (main), `pull_request` (main) |
 | [test.yml](./test.yml) | [![Test](https://github.com/rysk-tanaka/csvr/actions/workflows/test.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/test.yml) | `cargo test` の実行 | `push` (main), `pull_request` (main) |
 | [build.yml](./build.yml) | [![Build](https://github.com/rysk-tanaka/csvr/actions/workflows/build.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/build.yml) | リリースビルドの確認 | `push` (main), `pull_request` (main) |
 

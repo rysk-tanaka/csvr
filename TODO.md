@@ -54,7 +54,7 @@
 ## インフラ
 
 - [x] CI（GitHub Actions）
-- [ ] リリースビルド・配布
+- [x] リリースビルド・配布
 - [x] ライセンス整備（MIT LICENSE / THIRD_PARTY_LICENSES.html）
 - [ ] CI で THIRD_PARTY_LICENSES.html の同期検証 (#12)
 - [x] CI に cargo fmt --check を追加 (#17)

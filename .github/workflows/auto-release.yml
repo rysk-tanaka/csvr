@@ -33,3 +33,39 @@ jobs:
       tag_prefix: v
       force_released_output: ${{ github.event_name == 'workflow_dispatch' }}
     secrets: inherit
+
+  upload-binary:
+    needs: create-release
+    if: needs.create-release.outputs.released == 'true'
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: dtolnay/rust-toolchain@efa25f7f19611383d5b0ccf2d1c8914531636bf9 # stable
+        with:
+          toolchain: stable
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          tar czf csvr-${{ needs.create-release.outputs.tag }}-${{ matrix.target }}.tar.gz \
+            -C target/${{ matrix.target }}/release csvr
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload ${{ needs.create-release.outputs.tag }} \
+            csvr-${{ needs.create-release.outputs.tag }}-${{ matrix.target }}.tar.gz \
+            --clobber

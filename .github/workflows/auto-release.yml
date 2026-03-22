@@ -37,10 +37,15 @@ jobs:
   upload-binary:
     needs: create-release
     if: needs.create-release.outputs.released == 'true'
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
-        target: [aarch64-apple-darwin, x86_64-apple-darwin]
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-latest
+          - target: x86_64-apple-darwin
+            runner: macos-13
     steps:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - name: Add target
@@ -56,4 +61,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release upload ${{ needs.create-release.outputs.tag }} \
-            csvr-${{ needs.create-release.outputs.tag }}-${{ matrix.target }}.tar.gz
+            csvr-${{ needs.create-release.outputs.tag }}-${{ matrix.target }}.tar.gz \
+            --clobber

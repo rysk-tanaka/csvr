@@ -18,7 +18,7 @@
 
 ## CI と品質チェック
 
-GPUI が Metal を必要とするため、macOS ランナーで実行。全ワークフローで `--locked` フラグを使用。
+GPUI が Metal を必要とするため、macOS ランナーで実行。Cargo 実行では `--locked` フラグを使用。
 
 | Workflow | Status | 主目的 | トリガー |
 | --- | --- | --- | --- |

@@ -17,35 +17,12 @@ jobs:
       (github.event_name == 'pull_request_review_comment' && (contains(github.event.comment.body, '@claude ') || github.event.comment.body == '@claude')) ||
       (github.event_name == 'pull_request_review' && (contains(github.event.review.body, '@claude ') || github.event.review.body == '@claude')) ||
       (github.event_name == 'issues' && ((contains(github.event.issue.body, '@claude ') || github.event.issue.body == '@claude') || (contains(github.event.issue.title, '@claude ') || github.event.issue.title == '@claude')))
-    runs-on: ubuntu-latest
-    # timeout-minutes is intentionally omitted to allow long-running tasks
     permissions:
       contents: write
       pull-requests: write
       issues: write
       actions: read
       id-token: write
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
-      - name: Run Claude Code
-        id: claude
-        uses: anthropics/claude-code-action@v1
-        with:
-          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
-          track_progress: true
-
-          additional_permissions: |
-            actions: read
-
-          claude_args: '--model claude-sonnet-4-6 --allowed-tools "Write,Bash(gh issue create --title * --body-file *),Bash(gh issue comment * --body-file *)"'
-
-          prompt: |
-            ユーザーのリクエストに日本語で対応してください。
-            回答の最後に、使用したモデル名と実際のトークン数、推定コストを計算して出力してください。
-
-            ---
-            形式: 🤖 モデル: [実際のモデル名] / 💰 コスト: 入力[N]トークン, 出力[M]トークン, $[金額]
+    uses: rysk-tanaka/workflows/.github/workflows/claude.yml@main
+    secrets:
+      CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}

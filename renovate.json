@@ -1,15 +1,15 @@
 {
-	"$schema": "https://docs.renovatebot.com/renovate-schema.json",
-	"extends": ["config:recommended"],
-	"enabledManagers": ["cargo", "github-actions", "pre-commit"],
-	"labels": ["dependencies"],
-	"timezone": "Asia/Tokyo",
-	"schedule": ["before 9am on saturday"],
-	"packageRules": [
-		{
-			"matchUpdateTypes": ["minor", "patch"],
-			"matchManagers": ["cargo", "pre-commit"],
-			"automerge": true
-		}
-	]
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": ["config:recommended", "helpers:pinGitHubActionDigests"],
+  "enabledManagers": ["cargo", "github-actions", "pre-commit"],
+  "labels": ["dependencies"],
+  "timezone": "Asia/Tokyo",
+  "schedule": ["before 9am on saturday"],
+  "packageRules": [
+    {
+      "matchUpdateTypes": ["minor", "patch"],
+      "matchManagers": ["cargo", "pre-commit"],
+      "automerge": true
+    }
+  ]
 }

@@ -18,7 +18,7 @@
 
 ## CI と品質チェック
 
-GPUI が Metal を必要とするため、macOS ランナーで実行。ただし `lint.yml` の `cargo fmt --check` は Metal 不要のため `ubuntu-latest` で実行。Cargo 実行では `--locked` フラグを使用。
+GPUI が Metal を必要とするため、macOS ランナーで実行。ただし `lint.yml` の `cargo fmt --check` は Metal 不要のため `ubuntu-latest` で実行。Cargo 実行では `--locked` フラグを使用（`cargo fmt` は `--locked` 非対応のため除く）。
 
 | Workflow | Status | 主目的 | トリガー |
 | --- | --- | --- | --- |

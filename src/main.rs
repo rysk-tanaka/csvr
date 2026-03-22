@@ -6,9 +6,13 @@ mod data;
 use std::io::Cursor;
 use std::io::IsTerminal;
 
-use gpui::{App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
+use gpui::{
+    App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size,
+};
 
-use crate::app::{CopySelection, CsvrApp, DismissSearch, ExportJson, ExportMarkdown, ToggleChart, ToggleSearch};
+use crate::app::{
+    CopySelection, CsvrApp, DismissSearch, ExportJson, ExportMarkdown, ToggleChart, ToggleSearch,
+};
 use crate::data::{CsvData, decode_to_utf8};
 
 fn print_usage_and_exit(msg: &str) -> ! {

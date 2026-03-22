@@ -1,28 +1,32 @@
 use std::{ops::Range, rc::Rc};
 
-use regex::RegexBuilder;
 use gpui::{
-    App, ClipboardItem, Context, Entity, Focusable, FocusHandle, KeyDownEvent,
-    ListHorizontalSizingBehavior, Render, SharedString, UniformListScrollHandle,
-    Window, actions, canvas, div, prelude::*, px, rgb,
-    uniform_list,
+    App, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyDownEvent,
+    ListHorizontalSizingBehavior, Render, SharedString, UniformListScrollHandle, Window, actions,
+    canvas, div, prelude::*, px, rgb, uniform_list,
 };
+use regex::RegexBuilder;
 
-use crate::chart::{
-    CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart,
-};
+use crate::chart::{CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart};
 use crate::compute::{
-    ColumnStats, compute_column_stats, compute_column_widths, compute_numeric_columns,
-    compute_histogram_bins, downsample, export_json, export_markdown,
-    extract_column_values, extract_scatter_pairs,
-    filter_columns_by_regex, filter_rows, filter_rows_regex, parse_column_filter,
-    row_number_col_width, sort_indices,
+    ColumnStats, compute_column_stats, compute_column_widths, compute_histogram_bins,
+    compute_numeric_columns, downsample, export_json, export_markdown, extract_column_values,
+    extract_scatter_pairs, filter_columns_by_regex, filter_rows, filter_rows_regex,
+    parse_column_filter, row_number_col_width, sort_indices,
 };
-use crate::data::{
-    CHART_TYPES, ChartData, ChartType, CsvData, SortDirection,
-};
+use crate::data::{CHART_TYPES, ChartData, ChartType, CsvData, SortDirection};
 
-actions!(csvr, [ToggleSearch, DismissSearch, ToggleChart, CopySelection, ExportJson, ExportMarkdown]);
+actions!(
+    csvr,
+    [
+        ToggleSearch,
+        DismissSearch,
+        ToggleChart,
+        CopySelection,
+        ExportJson,
+        ExportMarkdown
+    ]
+);
 
 // Catppuccin Mocha palette
 const BG_BASE: u32 = 0x1e1e2e;
@@ -73,15 +77,9 @@ impl RenderOnce for TableRow {
         let pinned_count = self.pinned_col_count;
         let h_offset = self.h_offset;
 
-
         let make_cell = |col_idx: usize, entity: Entity<CsvrApp>| {
             let width = self.col_widths.get(col_idx).copied().unwrap_or(0.0);
-            let text: SharedString = self
-                .cells
-                .get(col_idx)
-                .cloned()
-                .unwrap_or_default()
-                .into();
+            let text: SharedString = self.cells.get(col_idx).cloned().unwrap_or_default().into();
             let is_cell_selected = matches!(selected_col, Some(Some(c)) if c == col_idx);
             div()
                 .id(SharedString::from(format!("cell-{}-{}", ix, col_idx)))
@@ -129,26 +127,25 @@ impl RenderOnce for TableRow {
                     })
                     .child(self.row_num.to_string())
             })
-            .children(self.visible_col_indices.iter().take(pinned_count).map(
-                |&col_idx| {
-                    let is_selected = matches!(selected_col, Some(Some(c)) if c == col_idx);
-                    // bg covers scrollable content behind pinned cells; skip when selected
-                    // so CELL_SELECTED_BG (set inside make_cell) is not overwritten.
-                    make_cell(col_idx, entity.clone())
-                        .when(!is_selected, |el| el.bg(rgb(bg)))
-                },
-            ));
-
-        // Scrollable section: non-pinned columns (flows naturally with h_offset)
-        let scrollable_div = div()
-            .flex()
-            .flex_row()
             .children(
                 self.visible_col_indices
                     .iter()
-                    .skip(pinned_count)
-                    .map(|&col_idx| make_cell(col_idx, entity.clone())),
+                    .take(pinned_count)
+                    .map(|&col_idx| {
+                        let is_selected = matches!(selected_col, Some(Some(c)) if c == col_idx);
+                        // bg covers scrollable content behind pinned cells; skip when selected
+                        // so CELL_SELECTED_BG (set inside make_cell) is not overwritten.
+                        make_cell(col_idx, entity.clone()).when(!is_selected, |el| el.bg(rgb(bg)))
+                    }),
             );
+
+        // Scrollable section: non-pinned columns (flows naturally with h_offset)
+        let scrollable_div = div().flex().flex_row().children(
+            self.visible_col_indices
+                .iter()
+                .skip(pinned_count)
+                .map(|&col_idx| make_cell(col_idx, entity.clone())),
+        );
 
         div()
             .id(("row", ix))
@@ -302,8 +299,13 @@ impl CsvrApp {
         }
         if let Some((col, direction)) = self.sort_state {
             let use_numeric = self.numeric_columns.get(col).copied().unwrap_or(false);
-            self.filtered_indices =
-                sort_indices(&self.rows, &self.filtered_indices, col, use_numeric, direction);
+            self.filtered_indices = sort_indices(
+                &self.rows,
+                &self.filtered_indices,
+                col,
+                use_numeric,
+                direction,
+            );
         }
         self.selected_cell = None;
         self.column_stats_cache = None;
@@ -394,7 +396,12 @@ impl CsvrApp {
                 ChartData::Bins(bins)
             }
             ChartType::Scatter => {
-                let pairs = extract_scatter_pairs(&self.rows, &self.filtered_indices, self.chart_x_col, self.chart_col);
+                let pairs = extract_scatter_pairs(
+                    &self.rows,
+                    &self.filtered_indices,
+                    self.chart_x_col,
+                    self.chart_col,
+                );
                 let limited = downsample(&pairs, 500);
                 ChartData::Pairs(limited)
             }
@@ -402,7 +409,8 @@ impl CsvrApp {
     }
 
     fn recompute_column_stats(&mut self) {
-        self.column_stats_cache = self.selected_cell
+        self.column_stats_cache = self
+            .selected_cell
             .and_then(|(_, col)| col)
             .filter(|&col| self.numeric_columns.get(col).copied().unwrap_or(false))
             .and_then(|col| compute_column_stats(&self.rows, &self.filtered_indices, col));
@@ -449,8 +457,8 @@ impl CsvrApp {
                 // unwrap_or(0): if `c` is not in vis_cols (shouldn't happen — cleared on
                 // recompute), fall back to first visible column rather than panicking.
                 let cur_pos = vis_cols.iter().position(|&v| v == c).unwrap_or(0);
-                let new_pos = (cur_pos as isize + col_delta)
-                    .clamp(0, vis_cols.len() as isize - 1) as usize;
+                let new_pos =
+                    (cur_pos as isize + col_delta).clamp(0, vis_cols.len() as isize - 1) as usize;
                 Some(vis_cols[new_pos])
             }
             _ => {
@@ -503,8 +511,10 @@ impl CsvrApp {
 
     fn export_json(&self, cx: &mut Context<Self>) {
         let text = export_json(
-            &self.raw_headers, &self.rows,
-            &self.filtered_indices, &self.visible_col_indices,
+            &self.raw_headers,
+            &self.rows,
+            &self.filtered_indices,
+            &self.visible_col_indices,
         );
         if !text.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -513,8 +523,10 @@ impl CsvrApp {
 
     fn export_markdown(&self, cx: &mut Context<Self>) {
         let text = export_markdown(
-            &self.raw_headers, &self.rows,
-            &self.filtered_indices, &self.visible_col_indices,
+            &self.raw_headers,
+            &self.rows,
+            &self.filtered_indices,
+            &self.visible_col_indices,
         );
         if !text.is_empty() {
             cx.write_to_clipboard(ClipboardItem::new_string(text));
@@ -644,7 +656,10 @@ impl CsvrApp {
 
     /// Check if any input mode is active (used to gate key triggers)
     fn any_input_active(&self) -> bool {
-        self.search_active || self.col_filter_active || self.pin_input_active || self.row_filter_active
+        self.search_active
+            || self.col_filter_active
+            || self.pin_input_active
+            || self.row_filter_active
     }
 }
 
@@ -700,7 +715,8 @@ impl Render for CsvrApp {
                 let keystroke = &event.keystroke;
 
                 // Arrow key navigation (works when no text input mode is active)
-                if !keystroke.modifiers.platform && !keystroke.modifiers.control
+                if !keystroke.modifiers.platform
+                    && !keystroke.modifiers.control
                     && !this.any_input_active()
                 {
                     match keystroke.key.as_str() {
@@ -858,12 +874,16 @@ impl Render for CsvrApp {
                     .font_weight(gpui::FontWeight::BOLD)
                     // Inner row: pinned section + scrollable section
                     .child({
-                        let pinned_count = self.pinned_col_count.min(self.visible_col_indices.len());
-
+                        let pinned_count =
+                            self.pinned_col_count.min(self.visible_col_indices.len());
 
                         let make_header_cell = |col_idx: usize, entity: Entity<CsvrApp>| {
                             let width = self.col_widths.get(col_idx).copied().unwrap_or(0.0);
-                            let label = self.headers.get(col_idx).cloned().unwrap_or_else(|| "".into());
+                            let label = self
+                                .headers
+                                .get(col_idx)
+                                .cloned()
+                                .unwrap_or_else(|| "".into());
                             let indicator: SharedString = match self.sort_state {
                                 Some((c, SortDirection::Ascending)) if c == col_idx => "▲".into(),
                                 Some((c, SortDirection::Descending)) if c == col_idx => "▼".into(),
@@ -921,15 +941,12 @@ impl Render for CsvrApp {
                             );
 
                         // Scrollable section: non-pinned header columns
-                        let scrollable_div = div()
-                            .flex()
-                            .flex_row()
-                            .children(
-                                self.visible_col_indices
-                                    .iter()
-                                    .skip(pinned_count)
-                                    .map(|&col_idx| make_header_cell(col_idx, entity.clone())),
-                            );
+                        let scrollable_div = div().flex().flex_row().children(
+                            self.visible_col_indices
+                                .iter()
+                                .skip(pinned_count)
+                                .map(|&col_idx| make_header_cell(col_idx, entity.clone())),
+                        );
 
                         div()
                             .flex()
@@ -968,10 +985,19 @@ impl Render for CsvrApp {
                         .items_center()
                         .gap_2()
                         .child(div().text_color(rgb(TEXT_SUBTEXT)).text_xs().child("*"))
-                        .child(div().flex_1().text_color(rgb(query_color)).child(query_display))
                         .child(
                             div()
-                                .text_color(rgb(if self.col_filter_error { TEXT_ERROR } else { TEXT_SUBTEXT }))
+                                .flex_1()
+                                .text_color(rgb(query_color))
+                                .child(query_display),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(if self.col_filter_error {
+                                    TEXT_ERROR
+                                } else {
+                                    TEXT_SUBTEXT
+                                }))
                                 .text_xs()
                                 .child(if self.col_filter_error {
                                     "invalid regex".to_string()
@@ -1036,10 +1062,19 @@ impl Render for CsvrApp {
                         .items_center()
                         .gap_2()
                         .child(div().text_color(rgb(TEXT_SUBTEXT)).text_xs().child("&"))
-                        .child(div().flex_1().text_color(rgb(query_color)).child(query_display))
                         .child(
                             div()
-                                .text_color(rgb(if self.row_filter_error { TEXT_ERROR } else { TEXT_SUBTEXT }))
+                                .flex_1()
+                                .text_color(rgb(query_color))
+                                .child(query_display),
+                        )
+                        .child(
+                            div()
+                                .text_color(rgb(if self.row_filter_error {
+                                    TEXT_ERROR
+                                } else {
+                                    TEXT_SUBTEXT
+                                }))
                                 .text_xs()
                                 .child(if self.row_filter_error {
                                     "invalid regex".to_string()
@@ -1073,12 +1108,7 @@ impl Render for CsvrApp {
                         .flex_row()
                         .items_center()
                         .gap_2()
-                        .child(
-                            div()
-                                .text_color(rgb(TEXT_SUBTEXT))
-                                .text_xs()
-                                .child("/"),
-                        )
+                        .child(div().text_color(rgb(TEXT_SUBTEXT)).text_xs().child("/"))
                         .child(
                             div()
                                 .flex_1()
@@ -1125,7 +1155,9 @@ impl Render for CsvrApp {
                             .rounded_md()
                             .text_xs()
                             .cursor_pointer()
-                            .when(is_active, |el| el.bg(rgb(SURFACE1)).text_color(rgb(CHART_BLUE)))
+                            .when(is_active, |el| {
+                                el.bg(rgb(SURFACE1)).text_color(rgb(CHART_BLUE))
+                            })
                             .when(!is_active, |el| el.text_color(rgb(TEXT_SUBTEXT)))
                             .on_click(move |_, _, cx| {
                                 entity.update(cx, |this, cx| {
@@ -1140,9 +1172,16 @@ impl Render for CsvrApp {
                         let is_scatter = chart_type == ChartType::Scatter;
                         // Y column (or single column for non-scatter)
                         let col_label: SharedString = if is_scatter {
-                            format!("Y: {}", headers.get(chart_col).map(|s| s.as_ref()).unwrap_or("?")).into()
+                            format!(
+                                "Y: {}",
+                                headers.get(chart_col).map(|s| s.as_ref()).unwrap_or("?")
+                            )
+                            .into()
                         } else {
-                            headers.get(chart_col).cloned().unwrap_or_else(|| "?".into())
+                            headers
+                                .get(chart_col)
+                                .cloned()
+                                .unwrap_or_else(|| "?".into())
                         };
                         let entity2 = entity.clone();
                         let numeric_cols2 = numeric_cols.clone();
@@ -1161,7 +1200,10 @@ impl Render for CsvrApp {
                                         if numeric_cols2.is_empty() {
                                             return;
                                         }
-                                        let cur_pos = numeric_cols2.iter().position(|&c| c == this.chart_col).unwrap_or(0);
+                                        let cur_pos = numeric_cols2
+                                            .iter()
+                                            .position(|&c| c == this.chart_col)
+                                            .unwrap_or(0);
                                         let next = (cur_pos + 1) % numeric_cols2.len();
                                         this.set_chart_col(numeric_cols2[next]);
                                         cx.notify();
@@ -1170,7 +1212,11 @@ impl Render for CsvrApp {
                                 .child(col_label),
                         )
                         .when(is_scatter, |el| {
-                            let x_label: SharedString = format!("X: {}", headers.get(chart_x_col).map(|s| s.as_ref()).unwrap_or("?")).into();
+                            let x_label: SharedString = format!(
+                                "X: {}",
+                                headers.get(chart_x_col).map(|s| s.as_ref()).unwrap_or("?")
+                            )
+                            .into();
                             let entity3 = entity.clone();
                             let numeric_cols3 = numeric_cols.clone();
                             el.child(
@@ -1188,7 +1234,10 @@ impl Render for CsvrApp {
                                             if numeric_cols3.is_empty() {
                                                 return;
                                             }
-                                            let cur_pos = numeric_cols3.iter().position(|&c| c == this.chart_x_col).unwrap_or(0);
+                                            let cur_pos = numeric_cols3
+                                                .iter()
+                                                .position(|&c| c == this.chart_x_col)
+                                                .unwrap_or(0);
                                             let next = (cur_pos + 1) % numeric_cols3.len();
                                             this.set_chart_x_col(numeric_cols3[next]);
                                             cx.notify();
@@ -1208,17 +1257,17 @@ impl Render for CsvrApp {
                     });
 
                 // Add X==Y warning for Scatter when both columns are the same
-                let toolbar = toolbar.when(chart_type == ChartType::Scatter && chart_col == chart_x_col, |el| {
-                    el.child(
-                        div()
-                            .text_xs()
-                            .text_color(rgb(CHART_PEACH))
-                            .child("X = Y"),
-                    )
-                });
+                let toolbar = toolbar.when(
+                    chart_type == ChartType::Scatter && chart_col == chart_x_col,
+                    |el| el.child(div().text_xs().text_color(rgb(CHART_PEACH)).child("X = Y")),
+                );
 
                 if !has_numeric || self.filtered_indices.is_empty() {
-                    let message = if !has_numeric { "No numeric columns" } else { "No data" };
+                    let message = if !has_numeric {
+                        "No numeric columns"
+                    } else {
+                        "No data"
+                    };
                     return el.child(toolbar).child(
                         div()
                             .w_full()
@@ -1229,12 +1278,7 @@ impl Render for CsvrApp {
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(
-                                div()
-                                    .text_color(rgb(TEXT_SUBTEXT))
-                                    .text_sm()
-                                    .child(message),
-                            ),
+                            .child(div().text_color(rgb(TEXT_SUBTEXT)).text_sm().child(message)),
                     );
                 }
 
@@ -1242,7 +1286,10 @@ impl Render for CsvrApp {
                 let chart_data = match &self.chart_data_cache {
                     Some(data) => data.clone(),
                     None => {
-                        debug_assert!(false, "chart_data_cache is None when chart is active with data");
+                        debug_assert!(
+                            false,
+                            "chart_data_cache is None when chart is active with data"
+                        );
                         eprintln!("Bug: chart_data_cache is None when chart should have data");
                         ChartData::Points(Vec::new())
                     }
@@ -1267,42 +1314,40 @@ impl Render for CsvrApp {
                 )
             })
             // Body
-            .child(
-                div().flex_1().size_full().child({
-                    let entity_for_rows = entity.clone();
-                    uniform_list(entity, "rows", filtered_count, {
-                        move |this, range, _, _| {
-                            this.visible_range = range.clone();
-                            range
-                                .filter_map(|i| {
-                                    let original_idx = *this.filtered_indices.get(i)?;
-                                    let selected_col = this.selected_cell.and_then(|(sel_row, col)| {
-                                        if sel_row == i { Some(col) } else { None }
-                                    });
-                                    Some(TableRow {
-                                        ix: i,
-                                        row_num: original_idx + 1,
-                                        cells: this.rows.get(original_idx)?.clone(),
-                                        col_widths: this.col_widths.clone(),
-                                        row_num_width: this.row_num_width,
-                                        min_row_width: viewport_width,
-                                        selected_col,
-                                        entity: entity_for_rows.clone(),
-                                        visible_col_indices: this.visible_col_indices.clone(),
-                                        pinned_col_count: this.pinned_col_count.min(this.visible_col_indices.len()),
-                                        h_offset: this.h_scroll_offset(),
-                                    })
+            .child(div().flex_1().size_full().child({
+                let entity_for_rows = entity.clone();
+                uniform_list(entity, "rows", filtered_count, {
+                    move |this, range, _, _| {
+                        this.visible_range = range.clone();
+                        range
+                            .filter_map(|i| {
+                                let original_idx = *this.filtered_indices.get(i)?;
+                                let selected_col = this.selected_cell.and_then(|(sel_row, col)| {
+                                    if sel_row == i { Some(col) } else { None }
+                                });
+                                Some(TableRow {
+                                    ix: i,
+                                    row_num: original_idx + 1,
+                                    cells: this.rows.get(original_idx)?.clone(),
+                                    col_widths: this.col_widths.clone(),
+                                    row_num_width: this.row_num_width,
+                                    min_row_width: viewport_width,
+                                    selected_col,
+                                    entity: entity_for_rows.clone(),
+                                    visible_col_indices: this.visible_col_indices.clone(),
+                                    pinned_col_count: this
+                                        .pinned_col_count
+                                        .min(this.visible_col_indices.len()),
+                                    h_offset: this.h_scroll_offset(),
                                 })
-                                .collect()
-                        }
-                    })
-                    .with_horizontal_sizing_behavior(
-                        ListHorizontalSizingBehavior::Unconstrained,
-                    )
-                    .size_full()
-                    .track_scroll(self.scroll_handle.clone())
-                }),
-            )
+                            })
+                            .collect()
+                    }
+                })
+                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                .size_full()
+                .track_scroll(self.scroll_handle.clone())
+            }))
             // Status bar
             .child({
                 let stats_text: Option<String> = self.column_stats_cache.as_ref().map(|stats| {
@@ -1345,9 +1390,7 @@ impl Render for CsvrApp {
                         div().child(parts.join("  "))
                     })
                     .when_some(stats_text, |el, text| {
-                        el.child(
-                            div().text_color(rgb(TEXT_MAIN)).child(text),
-                        )
+                        el.child(div().text_color(rgb(TEXT_MAIN)).child(text))
                     })
             })
     }

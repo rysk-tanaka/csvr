@@ -32,7 +32,11 @@ pub(crate) fn draw_chart(
             let max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
             let base_min = min.min(0.0);
             let effective_range = max - base_min;
-            let effective_range = if effective_range.abs() < f64::EPSILON { 1.0 } else { effective_range };
+            let effective_range = if effective_range.abs() < f64::EPSILON {
+                1.0
+            } else {
+                effective_range
+            };
 
             let n = vals.len();
             let gap = 1.0_f32;
@@ -51,14 +55,22 @@ pub(crate) fn draw_chart(
         (ChartType::Line, ChartData::Points(vals)) => {
             let min = vals.iter().cloned().fold(f64::INFINITY, f64::min);
             let max = vals.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-            let range = if (max - min).abs() < f64::EPSILON { 1.0 } else { max - min };
+            let range = if (max - min).abs() < f64::EPSILON {
+                1.0
+            } else {
+                max - min
+            };
 
             let n = vals.len();
             let points: Vec<(f32, f32)> = vals
                 .iter()
                 .enumerate()
                 .map(|(i, &v)| {
-                    let px_x = if n > 1 { x0 + i as f32 * w / (n - 1) as f32 } else { x0 + w / 2.0 };
+                    let px_x = if n > 1 {
+                        x0 + i as f32 * w / (n - 1) as f32
+                    } else {
+                        x0 + w / 2.0
+                    };
                     let normalized = (v - min) / range;
                     let px_y = y0 + h - normalized as f32 * h;
                     (px_x, px_y)
@@ -98,7 +110,8 @@ pub(crate) fn draw_chart(
             let bar_w = ((w - gap * (n as f32 - 1.0).max(0.0)) / n as f32).max(1.0);
 
             for (i, &count) in bins.iter().enumerate() {
-                let bar_h = (count as f32 / max_count as f32 * h).max(if count > 0 { 1.0 } else { 0.0 });
+                let bar_h =
+                    (count as f32 / max_count as f32 * h).max(if count > 0 { 1.0 } else { 0.0 });
                 let bx = x0 + i as f32 * (bar_w + gap);
                 let by = y0 + h - bar_h;
                 let rect = Bounds::new(point(px(bx), px(by)), size(px(bar_w), px(bar_h)));
@@ -113,8 +126,16 @@ pub(crate) fn draw_chart(
             let x_max = pairs.iter().map(|p| p.0).fold(f64::NEG_INFINITY, f64::max);
             let y_min = pairs.iter().map(|p| p.1).fold(f64::INFINITY, f64::min);
             let y_max = pairs.iter().map(|p| p.1).fold(f64::NEG_INFINITY, f64::max);
-            let x_range = if (x_max - x_min).abs() < f64::EPSILON { 1.0 } else { x_max - x_min };
-            let y_range = if (y_max - y_min).abs() < f64::EPSILON { 1.0 } else { y_max - y_min };
+            let x_range = if (x_max - x_min).abs() < f64::EPSILON {
+                1.0
+            } else {
+                x_max - x_min
+            };
+            let y_range = if (y_max - y_min).abs() < f64::EPSILON {
+                1.0
+            } else {
+                y_max - y_min
+            };
 
             let dot_r = 3.0_f32;
             for &(xv, yv) in pairs {

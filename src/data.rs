@@ -37,7 +37,9 @@ pub(crate) struct CsvData {
 
 impl CsvData {
     pub(crate) fn from_reader<R: std::io::Read>(reader: R) -> Result<Self, csv::Error> {
-        let mut rdr = csv::ReaderBuilder::new().has_headers(true).from_reader(reader);
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(true)
+            .from_reader(reader);
         let headers = rdr.headers()?.iter().map(|s| s.to_string()).collect();
         let rows = rdr
             .records()
@@ -67,14 +69,13 @@ fn cell_to_string(cell: &calamine::Data) -> String {
         }
         calamine::Data::Int(i) => format!("{}", i),
         calamine::Data::Bool(b) => format!("{}", b),
-        calamine::Data::DateTime(dt) => dt
-            .as_datetime()
-            .map(|d| d.to_string())
-            .unwrap_or_else(|| {
+        calamine::Data::DateTime(dt) => {
+            dt.as_datetime().map(|d| d.to_string()).unwrap_or_else(|| {
                 let v = dt.as_f64();
                 eprintln!("Warning: could not parse DateTime value {}", v);
                 format!("{}", v)
-            }),
+            })
+        }
         calamine::Data::DateTimeIso(s) => s.clone(),
         calamine::Data::DurationIso(s) => s.clone(),
         calamine::Data::Error(e) => format!("{}", e),
@@ -84,16 +85,20 @@ fn cell_to_string(cell: &calamine::Data) -> String {
 impl CsvData {
     pub(crate) fn from_xlsx<P: AsRef<std::path::Path>>(path: P) -> Result<Self, String> {
         use calamine::{Reader, open_workbook_auto};
-        let mut workbook = open_workbook_auto(&path)
-            .map_err(|e| format!("failed to open workbook: {}", e))?;
-        let first_sheet = workbook.sheet_names().first()
+        let mut workbook =
+            open_workbook_auto(&path).map_err(|e| format!("failed to open workbook: {}", e))?;
+        let first_sheet = workbook
+            .sheet_names()
+            .first()
             .ok_or_else(|| "workbook has no sheets".to_string())?
             .clone();
-        let range = workbook.worksheet_range(&first_sheet)
+        let range = workbook
+            .worksheet_range(&first_sheet)
             .map_err(|e| format!("failed to read sheet '{}': {}", first_sheet, e))?;
 
         let mut row_iter = range.rows();
-        let headers = row_iter.next()
+        let headers = row_iter
+            .next()
             .map(|row| row.iter().map(cell_to_string).collect())
             .unwrap_or_else(|| {
                 eprintln!("Warning: sheet '{}' is empty", first_sheet);
@@ -191,7 +196,9 @@ mod tests {
             0x96, 0xBC, 0x91, 0x4F, // 名前
             0x0A, // newline
         ];
-        let result = decode_to_utf8(&sjis_bytes).unwrap().expect("should transcode without errors");
+        let result = decode_to_utf8(&sjis_bytes)
+            .unwrap()
+            .expect("should transcode without errors");
         let decoded = std::str::from_utf8(&result).unwrap();
         assert!(decoded.contains("名前"));
     }
@@ -210,7 +217,10 @@ mod tests {
 
     #[test]
     fn cell_to_string_string() {
-        assert_eq!(cell_to_string(&calamine::Data::String("hello".into())), "hello");
+        assert_eq!(
+            cell_to_string(&calamine::Data::String("hello".into())),
+            "hello"
+        );
     }
 
     #[test]
@@ -237,12 +247,18 @@ mod tests {
     #[test]
     fn cell_to_string_float_large_integer() {
         // Below 1e15: uses `as i64` format (no decimal point)
-        assert_eq!(cell_to_string(&calamine::Data::Float(999_999_999_999_999.0)), "999999999999999");
+        assert_eq!(
+            cell_to_string(&calamine::Data::Float(999_999_999_999_999.0)),
+            "999999999999999"
+        );
         // At/above 1e15: uses f64 Display format to avoid i64 precision loss.
         // Note: both branches produce identical output at 1e15 because the value
         // is exactly representable in both f64 and i64. The threshold guards against
         // values where f64-to-i64 cast would silently lose precision.
-        assert_eq!(cell_to_string(&calamine::Data::Float(1e15)), "1000000000000000");
+        assert_eq!(
+            cell_to_string(&calamine::Data::Float(1e15)),
+            "1000000000000000"
+        );
     }
 
     #[test]

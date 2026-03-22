@@ -23,8 +23,7 @@ pub(crate) fn compute_column_widths(data: &CsvData) -> Vec<f32> {
                 .max()
                 .unwrap_or(0)
                 .max(header.to_uppercase().chars().count());
-            (max_len as f32 * CHAR_WIDTH + COL_PADDING)
-                .clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
+            (max_len as f32 * CHAR_WIDTH + COL_PADDING).clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
         })
         .collect()
 }
@@ -151,8 +150,16 @@ pub(crate) fn extract_scatter_pairs(
         .iter()
         .filter_map(|&i| {
             let row = rows.get(i)?;
-            let x = row.get(x_col)?.parse::<f64>().ok().filter(|v| v.is_finite())?;
-            let y = row.get(y_col)?.parse::<f64>().ok().filter(|v| v.is_finite())?;
+            let x = row
+                .get(x_col)?
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())?;
+            let y = row
+                .get(y_col)?
+                .parse::<f64>()
+                .ok()
+                .filter(|v| v.is_finite())?;
             Some((x, y))
         })
         .collect()
@@ -184,15 +191,20 @@ pub(crate) fn compute_column_stats(
     let mut max: f64 = f64::NEG_INFINITY;
 
     for &row_idx in indices {
-        let v = rows.get(row_idx)
+        let v = rows
+            .get(row_idx)
             .and_then(|row| row.get(col))
             .and_then(|cell| cell.parse::<f64>().ok())
             .filter(|v| v.is_finite());
         if let Some(v) = v {
             values.push(v);
             sum += v;
-            if v < min { min = v; }
-            if v > max { max = v; }
+            if v < min {
+                min = v;
+            }
+            if v > max {
+                max = v;
+            }
         }
     }
 
@@ -219,7 +231,15 @@ pub(crate) fn compute_column_stats(
         (values[count / 2 - 1] + values[count / 2]) / 2.0
     };
 
-    Some(ColumnStats { count, sum, min, max, mean, median, stddev })
+    Some(ColumnStats {
+        count,
+        sum,
+        min,
+        max,
+        mean,
+        median,
+        stddev,
+    })
 }
 
 /// Return indices of columns whose header matches the regex pattern (case-insensitive).
@@ -243,10 +263,7 @@ pub(crate) fn filter_columns_by_regex(
 /// Parse column filter query: "col:pattern" returns (Some(col_index), pattern),
 /// plain "pattern" returns (None, pattern). If col name doesn't match any header,
 /// treats the whole string as a global pattern.
-pub(crate) fn parse_column_filter(
-    query: &str,
-    headers: &[String],
-) -> (Option<usize>, String) {
+pub(crate) fn parse_column_filter(query: &str, headers: &[String]) -> (Option<usize>, String) {
     if let Some((prefix, suffix)) = query.split_once(':')
         && let Some(idx) = headers.iter().position(|h| h.eq_ignore_ascii_case(prefix))
     {
@@ -279,7 +296,6 @@ pub(crate) fn filter_rows_regex(
         })
         .collect())
 }
-
 
 /// Compute histogram bin counts for the given values.
 pub(crate) fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<usize> {
@@ -334,7 +350,9 @@ pub(crate) fn export_json(
     let mut out = String::new();
     let mut written = 0usize;
     for &row_idx in filtered_indices {
-        let Some(row) = rows.get(row_idx) else { continue };
+        let Some(row) = rows.get(row_idx) else {
+            continue;
+        };
         if written > 0 {
             out.push_str(",\n");
         }
@@ -390,7 +408,9 @@ pub(crate) fn export_markdown(
     out.push('\n');
     // Data rows
     for &row_idx in filtered_indices {
-        let Some(row) = rows.get(row_idx) else { continue };
+        let Some(row) = rows.get(row_idx) else {
+            continue;
+        };
         out.push('|');
         for &col_idx in visible_col_indices {
             let val = row.get(col_idx).map_or("", |s| s.as_str());
@@ -632,7 +652,10 @@ mod tests {
 
     #[test]
     fn numeric_columns_detection() {
-        let data = make_csv_data(&["name", "age", "score"], &[&["Alice", "30", "95.5"], &["Bob", "25", "87.0"]]);
+        let data = make_csv_data(
+            &["name", "age", "score"],
+            &[&["Alice", "30", "95.5"], &["Bob", "25", "87.0"]],
+        );
         let result = compute_numeric_columns(&data.rows, data.headers.len());
         assert_eq!(result, vec![false, true, true]);
     }
@@ -1086,20 +1109,17 @@ mod tests {
     #[test]
     fn export_json_basic() {
         let rows = make_rc_rows(&[&["Alice", "30"], &["Bob", "25"]]);
-        let result = export_json(
-            &["name".into(), "age".into()],
-            &rows, &[0, 1], &[0, 1],
+        let result = export_json(&["name".into(), "age".into()], &rows, &[0, 1], &[0, 1]);
+        assert_eq!(
+            result,
+            "[\n  {\"name\": \"Alice\", \"age\": \"30\"},\n  {\"name\": \"Bob\", \"age\": \"25\"}\n]\n"
         );
-        assert_eq!(result, "[\n  {\"name\": \"Alice\", \"age\": \"30\"},\n  {\"name\": \"Bob\", \"age\": \"25\"}\n]\n");
     }
 
     #[test]
     fn export_json_special_chars() {
         let rows = make_rc_rows(&[&["say \"hi\"", "line1\nline2"]]);
-        let result = export_json(
-            &["msg".into(), "note".into()],
-            &rows, &[0], &[0, 1],
-        );
+        let result = export_json(&["msg".into(), "note".into()], &rows, &[0], &[0, 1]);
         assert!(result.contains("say \\\"hi\\\""));
         assert!(result.contains("line1\\nline2"));
     }
@@ -1116,7 +1136,9 @@ mod tests {
         let rows = make_rc_rows(&[&["Alice", "30", "Tokyo"]]);
         let result = export_json(
             &["name".into(), "age".into(), "city".into()],
-            &rows, &[0], &[0, 2],
+            &rows,
+            &[0],
+            &[0, 2],
         );
         assert!(result.contains("\"name\""));
         assert!(result.contains("\"city\""));
@@ -1128,10 +1150,7 @@ mod tests {
     #[test]
     fn export_markdown_basic() {
         let rows = make_rc_rows(&[&["Alice", "30"], &["Bob", "25"]]);
-        let result = export_markdown(
-            &["name".into(), "age".into()],
-            &rows, &[0, 1], &[0, 1],
-        );
+        let result = export_markdown(&["name".into(), "age".into()], &rows, &[0, 1], &[0, 1]);
         assert_eq!(
             result,
             "| name | age |\n| --- | --- |\n| Alice | 30 |\n| Bob | 25 |\n"
@@ -1141,10 +1160,7 @@ mod tests {
     #[test]
     fn export_markdown_pipe_escape() {
         let rows = make_rc_rows(&[&["a|b"]]);
-        let result = export_markdown(
-            &["val".into()],
-            &rows, &[0], &[0],
-        );
+        let result = export_markdown(&["val".into()], &rows, &[0], &[0]);
         assert!(result.contains("a\\|b"));
     }
 
@@ -1160,7 +1176,9 @@ mod tests {
         let rows = make_rc_rows(&[&["Alice", "30", "Tokyo"]]);
         let result = export_markdown(
             &["name".into(), "age".into(), "city".into()],
-            &rows, &[0], &[0, 2],
+            &rows,
+            &[0],
+            &[0, 2],
         );
         assert!(result.contains("| name | city |"));
         assert!(!result.contains("age"));
@@ -1169,30 +1187,21 @@ mod tests {
     #[test]
     fn export_json_control_chars() {
         let rows = make_rc_rows(&[&["a\x00b\x08c\x1f"]]);
-        let result = export_json(
-            &["val".into()],
-            &rows, &[0], &[0],
-        );
+        let result = export_json(&["val".into()], &rows, &[0], &[0]);
         assert!(result.contains("a\\u0000b\\u0008c\\u001f"));
     }
 
     #[test]
     fn export_markdown_newline_in_cell() {
         let rows = make_rc_rows(&[&["line1\nline2"]]);
-        let result = export_markdown(
-            &["val".into()],
-            &rows, &[0], &[0],
-        );
+        let result = export_markdown(&["val".into()], &rows, &[0], &[0]);
         assert!(result.contains("| line1 line2 |"));
     }
 
     #[test]
     fn export_json_out_of_bounds_index() {
         let rows = make_rc_rows(&[&["Alice"]]);
-        let result = export_json(
-            &["name".into()],
-            &rows, &[0, 99], &[0],
-        );
+        let result = export_json(&["name".into()], &rows, &[0, 99], &[0]);
         // Row index 99 is skipped safely; only Alice appears
         assert_eq!(result, "[\n  {\"name\": \"Alice\"}\n]\n");
     }
@@ -1200,40 +1209,28 @@ mod tests {
     #[test]
     fn export_json_header_escape() {
         let rows = make_rc_rows(&[&["val"]]);
-        let result = export_json(
-            &["col\"name".into()],
-            &rows, &[0], &[0],
-        );
+        let result = export_json(&["col\"name".into()], &rows, &[0], &[0]);
         assert!(result.contains("\"col\\\"name\""));
     }
 
     #[test]
     fn export_markdown_header_pipe_escape() {
         let rows = make_rc_rows(&[&["val"]]);
-        let result = export_markdown(
-            &["col|name".into()],
-            &rows, &[0], &[0],
-        );
+        let result = export_markdown(&["col|name".into()], &rows, &[0], &[0]);
         assert!(result.contains("col\\|name"));
     }
 
     #[test]
     fn export_json_empty_visible_cols() {
         let rows = make_rc_rows(&[&["Alice"]]);
-        let result = export_json(
-            &["name".into()],
-            &rows, &[0], &[],
-        );
+        let result = export_json(&["name".into()], &rows, &[0], &[]);
         assert_eq!(result, "[]\n");
     }
 
     #[test]
     fn export_markdown_empty_visible_cols() {
         let rows = make_rc_rows(&[&["Alice"]]);
-        let result = export_markdown(
-            &["name".into()],
-            &rows, &[0], &[],
-        );
+        let result = export_markdown(&["name".into()], &rows, &[0], &[]);
         assert_eq!(result, "");
     }
 
@@ -1242,21 +1239,14 @@ mod tests {
         // When the first filtered index is out of bounds, the written counter
         // prevents a leading comma from appearing in the output.
         let rows = make_rc_rows(&[&["Alice"]]);
-        let result = export_json(
-            &["name".into()],
-            &rows, &[99, 0], &[0],
-        );
+        let result = export_json(&["name".into()], &rows, &[99, 0], &[0]);
         assert_eq!(result, "[\n  {\"name\": \"Alice\"}\n]\n");
     }
 
     #[test]
     fn export_markdown_cr_in_cell() {
         let rows = make_rc_rows(&[&["line1\r\nline2"]]);
-        let result = export_markdown(
-            &["val".into()],
-            &rows, &[0], &[0],
-        );
+        let result = export_markdown(&["val".into()], &rows, &[0], &[0]);
         assert!(result.contains("| line1  line2 |"));
     }
-
 }

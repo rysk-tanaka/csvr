@@ -89,10 +89,12 @@ fn find_dominant_field_count(header_len: usize, rows: &[Vec<String>]) -> usize {
             *counts.entry(row.len()).or_default() += 1;
         }
     }
-    // When tied, prefer the wider field count (more likely to be actual data)
+    // Only promote when another field count *strictly* dominates (not tied)
+    let header_count = counts.get(&header_len).copied().unwrap_or(0);
     counts
         .into_iter()
-        .max_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
+        .filter(|&(len, count)| len != header_len && count > header_count)
+        .max_by_key(|&(_, count)| count)
         .map(|(len, _)| len)
         .unwrap_or(header_len)
 }
@@ -237,10 +239,10 @@ mod tests {
     fn parse_promotes_header_from_dominant_width() {
         // Metadata header has 2 fields, but the majority of rows have 5.
         // The first 5-field row becomes the new header; earlier rows become metadata.
-        let input = "key,value\nmeta1,v1\nmeta2,v2\nh1,h2,h3,h4,h5\n1,2,3,4,5\n6,7,8,9,10\n";
+        let input = "key,value\nmeta1,v1\nmeta2,v2\nh1,h2,h3,h4,h5\n1,2,3,4,5\n6,7,8,9,10\n11,12,13,14,15\n";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
         assert_eq!(data.headers, vec!["h1", "h2", "h3", "h4", "h5"]);
-        assert_eq!(data.rows.len(), 2);
+        assert_eq!(data.rows.len(), 3);
         assert_eq!(data.rows[0], vec!["1", "2", "3", "4", "5"]);
         assert_eq!(data.metadata.len(), 3); // original header + 2 meta rows
         assert_eq!(data.metadata[0], vec!["key", "value"]);
@@ -253,6 +255,15 @@ mod tests {
         let input = "a,b\n1,2\n3,4\nx,y,z\n";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
         assert_eq!(data.headers, vec!["a", "b", "Column 3"]);
+    }
+
+    #[test]
+    fn parse_tied_counts_keep_original_header() {
+        // 2-field: header + 2 rows = 3, 3-field: 3 rows = 3 → tied, keep original header
+        let input = "a,b\n1,2\n3,4\nx,y,z\np,q,r\ns,t,u\n";
+        let data = CsvData::from_reader(input.as_bytes()).unwrap();
+        assert_eq!(data.headers, vec!["a", "b", "Column 3"]);
+        assert!(data.metadata.is_empty());
     }
 
     // --- decode_to_utf8 ---

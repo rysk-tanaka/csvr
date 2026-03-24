@@ -33,20 +33,67 @@ pub(crate) enum SortDirection {
 pub(crate) struct CsvData {
     pub(crate) headers: Vec<String>,
     pub(crate) rows: Vec<Vec<String>>,
+    /// Rows before the promoted header (metadata section in files with mixed formats)
+    pub(crate) metadata: Vec<Vec<String>>,
 }
 
 impl CsvData {
     pub(crate) fn from_reader<R: std::io::Read>(reader: R) -> Result<Self, csv::Error> {
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(true)
+            .flexible(true)
             .from_reader(reader);
-        let headers = rdr.headers()?.iter().map(|s| s.to_string()).collect();
-        let rows = rdr
+        let mut headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
+        let mut rows = rdr
             .records()
             .map(|r| r.map(|record| record.iter().map(|s| s.to_string()).collect()))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(CsvData { headers, rows })
+            .collect::<Result<Vec<Vec<String>>, _>>()?;
+
+        // Detect the dominant field count among all rows (including the parsed header).
+        // If it differs from the header's field count, find the first row matching the
+        // dominant count and promote it to the header, saving earlier rows as metadata.
+        let header_len = headers.len();
+        let dominant_len = find_dominant_field_count(header_len, &rows);
+        let mut metadata = Vec::new();
+        if dominant_len > header_len {
+            if let Some(pos) = rows.iter().position(|r| r.len() == dominant_len) {
+                // Save original header + rows before the promoted header as metadata
+                metadata.push(headers.clone());
+                metadata.extend_from_slice(&rows[..pos]);
+                headers = rows[pos].clone();
+                rows = rows[pos + 1..].to_vec();
+            }
+        }
+
+        // Pad headers for any remaining rows wider than the header
+        let max_fields = rows.iter().map(|r| r.len()).max().unwrap_or(0);
+        for i in headers.len()..max_fields {
+            headers.push(format!("Column {}", i + 1));
+        }
+
+        Ok(CsvData {
+            headers,
+            rows,
+            metadata,
+        })
     }
+}
+
+/// Find the most common field count. Returns `header_len` if no other count dominates.
+fn find_dominant_field_count(header_len: usize, rows: &[Vec<String>]) -> usize {
+    let mut counts = std::collections::HashMap::<usize, usize>::new();
+    *counts.entry(header_len).or_default() += 1; // count the header row itself
+    for row in rows {
+        if !row.is_empty() {
+            *counts.entry(row.len()).or_default() += 1;
+        }
+    }
+    // When tied, prefer the wider field count (more likely to be actual data)
+    counts
+        .into_iter()
+        .max_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
+        .map(|(len, _)| len)
+        .unwrap_or(header_len)
 }
 
 #[derive(Clone)]
@@ -108,7 +155,11 @@ impl CsvData {
             .map(|row| row.iter().map(cell_to_string).collect())
             .collect();
 
-        Ok(CsvData { headers, rows })
+        Ok(CsvData {
+            headers,
+            rows,
+            metadata: Vec::new(),
+        })
     }
 }
 
@@ -179,6 +230,28 @@ mod tests {
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
         assert!(data.headers.is_empty());
         assert!(data.rows.is_empty());
+    }
+
+    #[test]
+    fn parse_promotes_header_from_dominant_width() {
+        // Metadata header has 2 fields, but the majority of rows have 5.
+        // The first 5-field row becomes the new header; earlier rows become metadata.
+        let input = "key,value\nmeta1,v1\nmeta2,v2\nh1,h2,h3,h4,h5\n1,2,3,4,5\n6,7,8,9,10\n";
+        let data = CsvData::from_reader(input.as_bytes()).unwrap();
+        assert_eq!(data.headers, vec!["h1", "h2", "h3", "h4", "h5"]);
+        assert_eq!(data.rows.len(), 2);
+        assert_eq!(data.rows[0], vec!["1", "2", "3", "4", "5"]);
+        assert_eq!(data.metadata.len(), 3); // original header + 2 meta rows
+        assert_eq!(data.metadata[0], vec!["key", "value"]);
+        assert_eq!(data.metadata[1], vec!["meta1", "v1"]);
+    }
+
+    #[test]
+    fn parse_pads_headers_when_no_dominant() {
+        // Only one wider row — not dominant, so headers get padded instead.
+        let input = "a,b\n1,2\n3,4\nx,y,z\n";
+        let data = CsvData::from_reader(input.as_bytes()).unwrap();
+        assert_eq!(data.headers, vec!["a", "b", "Column 3"]);
     }
 
     // --- decode_to_utf8 ---

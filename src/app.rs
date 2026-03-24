@@ -22,6 +22,7 @@ actions!(
         ToggleSearch,
         DismissSearch,
         ToggleChart,
+        ToggleMetadata,
         CopySelection,
         ExportJson,
         ExportMarkdown
@@ -165,6 +166,8 @@ impl RenderOnce for TableRow {
 }
 
 pub(crate) struct CsvrApp {
+    /// Metadata rows extracted before the promoted header (key-value pairs, section labels, etc.)
+    metadata: Vec<Vec<String>>,
     headers: Vec<SharedString>,
     /// Original headers (not uppercased) for regex matching and column filter parsing
     raw_headers: Vec<String>,
@@ -179,6 +182,7 @@ pub(crate) struct CsvrApp {
     filtered_indices: Vec<usize>,
     sort_state: Option<(usize, SortDirection)>,
     chart_active: bool,
+    metadata_visible: bool,
     chart_type: ChartType,
     chart_col: usize,
     chart_x_col: usize,
@@ -239,7 +243,9 @@ impl CsvrApp {
             .map(|i| i + first_numeric + 1)
             .unwrap_or(first_numeric);
         let visible_col_indices = Rc::new((0..col_count).collect());
+        let has_metadata = !data.metadata.is_empty();
         Self {
+            metadata: data.metadata,
             headers,
             raw_headers,
             rows,
@@ -253,6 +259,7 @@ impl CsvrApp {
             filtered_indices: (0..total_rows).collect(),
             sort_state: None,
             chart_active: false,
+            metadata_visible: has_metadata,
             chart_type: ChartType::Bar,
             chart_col: first_numeric,
             chart_x_col: second_numeric,
@@ -342,6 +349,12 @@ impl CsvrApp {
         self.search_active = false;
         // Keep current filter (consistent with `*` and `&` Escape behavior).
         // User can clear by reopening `/` and deleting the query.
+    }
+
+    fn toggle_metadata(&mut self) {
+        if !self.metadata.is_empty() {
+            self.metadata_visible = !self.metadata_visible;
+        }
     }
 
     fn toggle_chart(&mut self) {
@@ -702,6 +715,10 @@ impl Render for CsvrApp {
                 this.toggle_chart();
                 cx.notify();
             }))
+            .on_action(cx.listener(|this, _: &ToggleMetadata, _window, cx| {
+                this.toggle_metadata();
+                cx.notify();
+            }))
             .on_action(cx.listener(|this, _: &CopySelection, _window, cx| {
                 this.copy_selection(cx);
             }))
@@ -849,6 +866,10 @@ impl Render for CsvrApp {
                             this.toggle_pin_input();
                             cx.notify();
                         }
+                        Some("m") => {
+                            this.toggle_metadata();
+                            cx.notify();
+                        }
                         _ => {}
                     }
                 }
@@ -956,6 +977,39 @@ impl Render for CsvrApp {
                             .child(scrollable_div)
                     }),
             )
+            // Metadata section (rows from file header before the promoted data header)
+            .when(self.metadata_visible && !self.metadata.is_empty(), |el| {
+                let items: Vec<SharedString> = self
+                    .metadata
+                    .iter()
+                    .filter_map(|row| {
+                        let joined = row.join("  ");
+                        let trimmed = joined.trim().to_string();
+                        if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(SharedString::from(trimmed))
+                        }
+                    })
+                    .collect();
+                el.child(
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .bg(rgb(SEARCH_BG))
+                        .border_b_1()
+                        .border_color(rgb(BORDER_COLOR))
+                        .flex()
+                        .flex_row()
+                        .flex_wrap()
+                        .gap_y_0p5()
+                        .children(items.into_iter().enumerate().map(|(i, text)| {
+                            let el = div().text_sm().text_color(rgb(TEXT_SUBTEXT)).child(text);
+                            if i > 0 { el.ml_4() } else { el }
+                        })),
+                )
+            })
             // `*` column filter bar
             .when(self.col_filter_active, |el| {
                 let query_display: SharedString = if self.col_filter_query.is_empty() {

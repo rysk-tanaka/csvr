@@ -52,10 +52,19 @@ pub(crate) fn filter_rows(rows: &[Rc<Vec<String>>], query: &str) -> Vec<usize> {
 pub(crate) fn compute_numeric_columns(rows: &[Vec<String>], col_count: usize) -> Vec<bool> {
     (0..col_count)
         .map(|col| {
-            rows.iter().all(|row| {
+            let mut numeric_count: usize = 0;
+            let mut non_empty_count: usize = 0;
+            for row in rows {
                 let val = row.get(col).map(|s| s.as_str()).unwrap_or("");
-                val.is_empty() || val.parse::<f64>().is_ok()
-            })
+                if !val.is_empty() {
+                    non_empty_count += 1;
+                    if val.parse::<f64>().is_ok() {
+                        numeric_count += 1;
+                    }
+                }
+            }
+            // Treat as numeric if more than half of non-empty values are parseable
+            non_empty_count > 0 && numeric_count > non_empty_count / 2
         })
         .collect()
 }
@@ -433,6 +442,7 @@ mod tests {
                 .iter()
                 .map(|row| row.iter().map(|s| s.to_string()).collect())
                 .collect(),
+            metadata: Vec::new(),
         }
     }
 
@@ -477,9 +487,13 @@ mod tests {
 
     #[test]
     fn parse_ragged_rows() {
+        // flexible(true) accepts rows with fewer/more fields than the header.
+        // Ragged rows display with blank cells in the UI.
         let input = "a,b,c\n1,2\n4,5,6\n";
-        let result = CsvData::from_reader(input.as_bytes());
-        assert!(result.is_err());
+        let data = CsvData::from_reader(input.as_bytes()).unwrap();
+        assert_eq!(data.rows.len(), 2);
+        assert_eq!(data.rows[0], vec!["1", "2"]);
+        assert_eq!(data.rows[1], vec!["4", "5", "6"]);
     }
 
     #[test]
@@ -668,8 +682,17 @@ mod tests {
     }
 
     #[test]
-    fn numeric_columns_mixed() {
+    fn numeric_columns_majority_numeric() {
+        // 2/3 numeric → treated as numeric
         let data = make_csv_data(&["col"], &[&["1"], &["abc"], &["3"]]);
+        let result = compute_numeric_columns(&data.rows, data.headers.len());
+        assert_eq!(result, vec![true]);
+    }
+
+    #[test]
+    fn numeric_columns_majority_text() {
+        // 1/3 numeric → not numeric
+        let data = make_csv_data(&["col"], &[&["abc"], &["def"], &["3"]]);
         let result = compute_numeric_columns(&data.rows, data.headers.len());
         assert_eq!(result, vec![false]);
     }

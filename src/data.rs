@@ -33,7 +33,7 @@ pub(crate) enum SortDirection {
 pub(crate) struct CsvData {
     pub(crate) headers: Vec<String>,
     pub(crate) rows: Vec<Vec<String>>,
-    /// Rows before the promoted header (metadata section in files with mixed formats)
+    /// Original header row + rows before the promoted header (metadata section in files with mixed formats)
     pub(crate) metadata: Vec<Vec<String>>,
 }
 
@@ -50,8 +50,8 @@ impl CsvData {
             .collect::<Result<Vec<Vec<String>>, _>>()?;
 
         // Detect the dominant field count among all rows (including the parsed header).
-        // If it differs from the header's field count, find the first row matching the
-        // dominant count and promote it to the header, saving earlier rows as metadata.
+        // If a wider field count is strictly more frequent than the header's, promote the
+        // first row matching that count to the header, saving earlier rows as metadata.
         let header_len = headers.len();
         let dominant_len = find_dominant_field_count(header_len, &rows);
         let mut metadata = Vec::new();
@@ -93,12 +93,13 @@ fn find_dominant_field_count(header_len: usize, rows: &[Vec<String>]) -> usize {
             *counts.entry(row.len()).or_default() += 1;
         }
     }
-    // Only promote when another field count *strictly* dominates (not tied)
+    // Only promote when another field count is strictly more frequent than the header's.
+    // If multiple non-header widths tie for the highest count, the wider one wins.
     let header_count = counts.get(&header_len).copied().unwrap_or(0);
     counts
         .into_iter()
         .filter(|&(len, count)| len != header_len && count > header_count)
-        .max_by_key(|&(_, count)| count)
+        .max_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
         .map(|(len, _)| len)
         .unwrap_or(header_len)
 }

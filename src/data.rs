@@ -93,14 +93,24 @@ fn find_dominant_field_count(header_len: usize, rows: &[Vec<String>]) -> usize {
             *counts.entry(row.len()).or_default() += 1;
         }
     }
-    // Only promote when another field count is strictly more frequent than the header's.
-    // If multiple non-header widths tie for the highest count, the wider one wins.
+    // Only promote when exactly one non-header field count is strictly more frequent
+    // than the header's. If multiple non-header widths tie, the result is ambiguous
+    // so we fall back to the original header.
     let header_count = counts.get(&header_len).copied().unwrap_or(0);
-    counts
+    let candidates: Vec<(usize, usize)> = counts
         .into_iter()
         .filter(|&(len, count)| len != header_len && count > header_count)
-        .max_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)))
+        .collect();
+    let max_count = candidates.iter().map(|&(_, c)| c).max().unwrap_or(0);
+    let winners: Vec<usize> = candidates
+        .into_iter()
+        .filter(|&(_, c)| c == max_count)
         .map(|(len, _)| len)
+        .collect();
+    winners
+        .first()
+        .copied()
+        .filter(|_| winners.len() == 1)
         .unwrap_or(header_len)
 }
 

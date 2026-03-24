@@ -60,11 +60,12 @@ impl CsvData {
             .position(|r| dominant_len > header_len && r.len() == dominant_len)
         {
             // Move rows before the promoted header into metadata (avoids cloning)
-            let mut tail = rows.split_off(pos);
+            let tail = rows.split_off(pos);
             metadata.push(std::mem::take(&mut headers));
             metadata.append(&mut rows);
-            headers = tail.remove(0);
-            rows = tail;
+            let mut tail_iter = tail.into_iter();
+            headers = tail_iter.next().unwrap_or_default();
+            rows = tail_iter.collect();
         }
 
         // Pad headers for any remaining rows wider than the header
@@ -82,7 +83,8 @@ impl CsvData {
 }
 
 /// Find the field count that strictly dominates (more frequent than) the header's field count.
-/// Returns `header_len` if no other count is strictly more frequent.
+/// Returns `header_len` if no other count is strictly more frequent, or if multiple
+/// non-header widths tie for the highest frequency (ambiguous case).
 fn find_dominant_field_count(header_len: usize, rows: &[Vec<String>]) -> usize {
     let mut counts = std::collections::HashMap::<usize, usize>::new();
     if header_len > 0 {
@@ -93,9 +95,9 @@ fn find_dominant_field_count(header_len: usize, rows: &[Vec<String>]) -> usize {
             *counts.entry(row.len()).or_default() += 1;
         }
     }
-    // Only promote when exactly one non-header field count is strictly more frequent
-    // than the header's. If multiple non-header widths tie, the result is ambiguous
-    // so we fall back to the original header.
+    // Promote only when a single non-header field count is strictly more frequent than
+    // the header's. If multiple non-header widths share the highest count (tied), the
+    // result is ambiguous so we fall back to the original header.
     let header_count = counts.get(&header_len).copied().unwrap_or(0);
     let candidates: Vec<(usize, usize)> = counts
         .into_iter()

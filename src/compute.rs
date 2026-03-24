@@ -64,7 +64,7 @@ pub(crate) fn compute_numeric_columns(rows: &[Vec<String>], col_count: usize) ->
                 }
             }
             // Treat as numeric if more than half of non-empty values are parseable
-            non_empty_count > 0 && numeric_count * 2 > non_empty_count
+            non_empty_count > 0 && numeric_count > non_empty_count / 2
         })
         .collect()
 }

@@ -59,11 +59,12 @@ impl CsvData {
             .iter()
             .position(|r| dominant_len > header_len && r.len() == dominant_len)
         {
-            // Save original header + rows before the promoted header as metadata
-            metadata.push(headers.clone());
-            metadata.extend_from_slice(&rows[..pos]);
-            headers = rows[pos].clone();
-            rows = rows[pos + 1..].to_vec();
+            // Move rows before the promoted header into metadata (avoids cloning)
+            let mut tail = rows.split_off(pos);
+            metadata.push(std::mem::take(&mut headers));
+            metadata.append(&mut rows);
+            headers = tail.remove(0);
+            rows = tail;
         }
 
         // Pad headers for any remaining rows wider than the header
@@ -80,10 +81,13 @@ impl CsvData {
     }
 }
 
-/// Find the most common field count. Returns `header_len` if no other count dominates.
+/// Find the field count that strictly dominates (more frequent than) the header's field count.
+/// Returns `header_len` if no other count is strictly more frequent.
 fn find_dominant_field_count(header_len: usize, rows: &[Vec<String>]) -> usize {
     let mut counts = std::collections::HashMap::<usize, usize>::new();
-    *counts.entry(header_len).or_default() += 1; // count the header row itself
+    if header_len > 0 {
+        *counts.entry(header_len).or_default() += 1; // count the header row itself
+    }
     for row in rows {
         if !row.is_empty() {
             *counts.entry(row.len()).or_default() += 1;

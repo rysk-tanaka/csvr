@@ -351,6 +351,12 @@ impl CsvrApp {
         // User can clear by reopening `/` and deleting the query.
     }
 
+    fn toggle_metadata(&mut self) {
+        if !self.metadata.is_empty() {
+            self.metadata_visible = !self.metadata_visible;
+        }
+    }
+
     fn toggle_chart(&mut self) {
         self.chart_active = !self.chart_active;
         if self.chart_active {
@@ -710,7 +716,7 @@ impl Render for CsvrApp {
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleMetadata, _window, cx| {
-                this.metadata_visible = !this.metadata_visible;
+                this.toggle_metadata();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CopySelection, _window, cx| {
@@ -860,8 +866,8 @@ impl Render for CsvrApp {
                             this.toggle_pin_input();
                             cx.notify();
                         }
-                        Some("m") if !this.metadata.is_empty() => {
-                            this.metadata_visible = !this.metadata_visible;
+                        Some("m") => {
+                            this.toggle_metadata();
                             cx.notify();
                         }
                         _ => {}
@@ -972,7 +978,7 @@ impl Render for CsvrApp {
                     }),
             )
             // Metadata section (rows from file header before the promoted data header)
-            .when(self.metadata_visible, |el| {
+            .when(self.metadata_visible && !self.metadata.is_empty(), |el| {
                 let items: Vec<SharedString> = self
                     .metadata
                     .iter()

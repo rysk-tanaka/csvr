@@ -487,6 +487,8 @@ mod tests {
 
     #[test]
     fn parse_ragged_rows() {
+        // flexible(true) accepts rows with fewer/more fields than the header.
+        // Ragged rows display with blank cells in the UI.
         let input = "a,b,c\n1,2\n4,5,6\n";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
         assert_eq!(data.rows.len(), 2);

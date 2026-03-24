@@ -87,6 +87,7 @@ fn load_csv() -> CsvData {
     print_usage_and_exit("no input provided");
 }
 
+#[allow(unexpected_cfgs)]
 fn set_dock_icon() {
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};
@@ -100,6 +101,7 @@ fn set_dock_icon() {
         let image: *mut Object = msg_send![image, initWithData: data];
         let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
         let _: () = msg_send![app, setApplicationIconImage: image];
+        let _: () = msg_send![image, release];
     }
 }
 

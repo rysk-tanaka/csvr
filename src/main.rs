@@ -87,7 +87,6 @@ fn load_csv() -> CsvData {
     print_usage_and_exit("no input provided");
 }
 
-#[allow(unexpected_cfgs)]
 fn set_dock_icon() {
     use objc::runtime::Object;
     use objc::{class, msg_send, sel, sel_impl};

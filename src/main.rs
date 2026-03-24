@@ -88,8 +88,8 @@ fn load_csv() -> CsvData {
 }
 
 fn set_dock_icon() {
-    use objc::{class, msg_send, sel, sel_impl};
     use objc::runtime::Object;
+    use objc::{class, msg_send, sel, sel_impl};
 
     static ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
 

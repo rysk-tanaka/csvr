@@ -1203,6 +1203,7 @@ dependencies = [
  "csv",
  "encoding_rs",
  "gpui",
+ "objc",
  "regex",
 ]
 

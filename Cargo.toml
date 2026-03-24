@@ -11,3 +11,4 @@ regex = "1.12.3"
 chardetng = "0.1.17"
 encoding_rs = "0.8.35"
 calamine = { version = "0.34.0", features = ["dates"] }
+objc = "0.2"

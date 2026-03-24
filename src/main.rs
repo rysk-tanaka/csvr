@@ -87,9 +87,26 @@ fn load_csv() -> CsvData {
     print_usage_and_exit("no input provided");
 }
 
+fn set_dock_icon() {
+    use objc::{class, msg_send, sel, sel_impl};
+    use objc::runtime::Object;
+
+    static ICON_PNG: &[u8] = include_bytes!("../assets/icon.png");
+
+    unsafe {
+        let data: *mut Object =
+            msg_send![class!(NSData), dataWithBytes:ICON_PNG.as_ptr() length:ICON_PNG.len()];
+        let image: *mut Object = msg_send![class!(NSImage), alloc];
+        let image: *mut Object = msg_send![image, initWithData: data];
+        let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+        let _: () = msg_send![app, setApplicationIconImage: image];
+    }
+}
+
 fn main() {
     let data = load_csv();
     Application::new().run(|cx: &mut App| {
+        set_dock_icon();
         cx.bind_keys([
             KeyBinding::new("cmd-f", ToggleSearch, Some("CsvrApp")),
             KeyBinding::new("escape", DismissSearch, Some("CsvrApp")),

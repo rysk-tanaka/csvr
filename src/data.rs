@@ -55,14 +55,15 @@ impl CsvData {
         let header_len = headers.len();
         let dominant_len = find_dominant_field_count(header_len, &rows);
         let mut metadata = Vec::new();
-        if dominant_len > header_len {
-            if let Some(pos) = rows.iter().position(|r| r.len() == dominant_len) {
-                // Save original header + rows before the promoted header as metadata
-                metadata.push(headers.clone());
-                metadata.extend_from_slice(&rows[..pos]);
-                headers = rows[pos].clone();
-                rows = rows[pos + 1..].to_vec();
-            }
+        if let Some(pos) = rows
+            .iter()
+            .position(|r| dominant_len > header_len && r.len() == dominant_len)
+        {
+            // Save original header + rows before the promoted header as metadata
+            metadata.push(headers.clone());
+            metadata.extend_from_slice(&rows[..pos]);
+            headers = rows[pos].clone();
+            rows = rows[pos + 1..].to_vec();
         }
 
         // Pad headers for any remaining rows wider than the header

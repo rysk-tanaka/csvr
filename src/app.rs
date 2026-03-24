@@ -999,15 +999,8 @@ impl Render for CsvrApp {
                         .flex_wrap()
                         .gap_y_0p5()
                         .children(items.into_iter().enumerate().map(|(i, text)| {
-                            let el = div()
-                                .text_sm()
-                                .text_color(rgb(TEXT_SUBTEXT))
-                                .child(text);
-                            if i > 0 {
-                                el.ml_4()
-                            } else {
-                                el
-                            }
+                            let el = div().text_sm().text_color(rgb(TEXT_SUBTEXT)).child(text);
+                            if i > 0 { el.ml_4() } else { el }
                         })),
                 )
             })

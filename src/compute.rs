@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use regex::RegexBuilder;
@@ -349,18 +349,29 @@ fn escape_json_string(s: &str) -> String {
 
 /// Build deduplicated JSON keys for visible columns.
 /// Duplicate headers get `_2`, `_3`, … suffixes.
+/// Increments the suffix until the candidate is unique among all emitted keys.
 fn deduplicate_json_keys(headers: &[String], visible_col_indices: &[usize]) -> Vec<String> {
-    let mut seen: HashMap<&str, usize> = HashMap::new();
+    let mut seen_counts: HashMap<&str, usize> = HashMap::new();
+    let mut used: HashSet<String> = HashSet::new();
     let mut keys = Vec::with_capacity(visible_col_indices.len());
     for &col_idx in visible_col_indices {
         let name = headers.get(col_idx).map_or("", |s| s.as_str());
-        let count = seen.entry(name).or_insert(0);
+        let count = seen_counts.entry(name).or_insert(0);
         *count += 1;
-        if *count == 1 {
-            keys.push(name.to_string());
+        let key = if *count == 1 && !used.contains(name) {
+            name.to_string()
         } else {
-            keys.push(format!("{}_{}", name, count));
-        }
+            let mut n = *count;
+            loop {
+                let candidate = format!("{}_{}", name, n);
+                if !used.contains(&candidate) {
+                    break candidate;
+                }
+                n += 1;
+            }
+        };
+        used.insert(key.clone());
+        keys.push(key);
     }
     keys
 }
@@ -1335,5 +1346,13 @@ mod tests {
         let headers = vec!["a".into(), "b".into(), "a".into(), "c".into(), "a".into()];
         let keys = deduplicate_json_keys(&headers, &[0, 1, 2, 3, 4]);
         assert_eq!(keys, vec!["a", "b", "a_2", "c", "a_3"]);
+    }
+
+    #[test]
+    fn deduplicate_json_keys_collision_with_existing() {
+        // "a_2" already exists as a header, so the suffix for the second "a" must skip to _3.
+        let headers: Vec<String> = vec!["a".into(), "a_2".into(), "a".into()];
+        let keys = deduplicate_json_keys(&headers, &[0, 1, 2]);
+        assert_eq!(keys, vec!["a", "a_2", "a_3"]);
     }
 }

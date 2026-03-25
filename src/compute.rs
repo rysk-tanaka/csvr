@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use regex::RegexBuilder;
@@ -346,6 +347,24 @@ fn escape_json_string(s: &str) -> String {
     out
 }
 
+/// Build deduplicated JSON keys for visible columns.
+/// Duplicate headers get `_2`, `_3`, … suffixes.
+fn deduplicate_json_keys(headers: &[String], visible_col_indices: &[usize]) -> Vec<String> {
+    let mut seen: HashMap<&str, usize> = HashMap::new();
+    let mut keys = Vec::with_capacity(visible_col_indices.len());
+    for &col_idx in visible_col_indices {
+        let name = headers.get(col_idx).map_or("", |s| s.as_str());
+        let count = seen.entry(name).or_insert(0);
+        *count += 1;
+        if *count == 1 {
+            keys.push(name.to_string());
+        } else {
+            keys.push(format!("{}_{}", name, count));
+        }
+    }
+    keys
+}
+
 /// Export visible data as JSON (array of objects).
 pub(crate) fn export_json(
     headers: &[String],
@@ -356,6 +375,7 @@ pub(crate) fn export_json(
     if visible_col_indices.is_empty() {
         return "[]\n".to_string();
     }
+    let deduped_keys = deduplicate_json_keys(headers, visible_col_indices);
     let mut out = String::new();
     let mut written = 0usize;
     for &row_idx in filtered_indices {
@@ -370,7 +390,7 @@ pub(crate) fn export_json(
             if j > 0 {
                 out.push_str(", ");
             }
-            let key = headers.get(col_idx).map_or("", |s| s.as_str());
+            let key = &deduped_keys[j];
             let val = row.get(col_idx).map_or("", |s| s.as_str());
             out.push_str(&format!(
                 "\"{}\": \"{}\"",
@@ -1271,5 +1291,49 @@ mod tests {
         let rows = make_rc_rows(&[&["line1\r\nline2"]]);
         let result = export_markdown(&["val".into()], &rows, &[0], &[0]);
         assert!(result.contains("| line1  line2 |"));
+    }
+
+    #[test]
+    fn export_json_duplicate_headers() {
+        let rows = make_rc_rows(&[&["Alice", "Bob", "30"]]);
+        let result = export_json(
+            &["name".into(), "name".into(), "value".into()],
+            &rows,
+            &[0],
+            &[0, 1, 2],
+        );
+        assert_eq!(
+            result,
+            "[\n  {\"name\": \"Alice\", \"name_2\": \"Bob\", \"value\": \"30\"}\n]\n"
+        );
+    }
+
+    #[test]
+    fn export_json_triple_duplicate_headers() {
+        let rows = make_rc_rows(&[&["a", "b", "c"]]);
+        let result = export_json(
+            &["x".into(), "x".into(), "x".into()],
+            &rows,
+            &[0],
+            &[0, 1, 2],
+        );
+        assert_eq!(
+            result,
+            "[\n  {\"x\": \"a\", \"x_2\": \"b\", \"x_3\": \"c\"}\n]\n"
+        );
+    }
+
+    #[test]
+    fn export_json_empty_duplicate_headers() {
+        let rows = make_rc_rows(&[&["a", "b"]]);
+        let result = export_json(&["".into(), "".into()], &rows, &[0], &[0, 1]);
+        assert_eq!(result, "[\n  {\"\": \"a\", \"_2\": \"b\"}\n]\n");
+    }
+
+    #[test]
+    fn deduplicate_json_keys_basic() {
+        let headers = vec!["a".into(), "b".into(), "a".into(), "c".into(), "a".into()];
+        let keys = deduplicate_json_keys(&headers, &[0, 1, 2, 3, 4]);
+        assert_eq!(keys, vec!["a", "b", "a_2", "c", "a_3"]);
     }
 }

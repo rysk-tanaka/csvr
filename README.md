@@ -108,6 +108,7 @@ cargo fmt --check        # フォーマットチェック
 | [calamine](https://crates.io/crates/calamine) | xlsx/xls 読み込み |
 | [regex](https://crates.io/crates/regex) | 正規表現（列/行フィルタ） |
 | [chardetng](https://crates.io/crates/chardetng) + [encoding_rs](https://crates.io/crates/encoding_rs) | 文字エンコーディング検出・変換 |
+| [objc](https://crates.io/crates/objc) | macOS Dock アイコン設定 |
 
 ---
 
@@ -116,3 +117,4 @@ cargo fmt --check        # フォーマットチェック
 MIT License — © Ryosuke Tanaka
 
 サードパーティのライセンス情報は [THIRD_PARTY_LICENSES.html](./THIRD_PARTY_LICENSES.html) を参照してください。
+アプリアイコンのライセンス情報は [assets/LICENSE](./assets/LICENSE) を参照してください。

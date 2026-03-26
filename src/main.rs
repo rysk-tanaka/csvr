@@ -48,31 +48,30 @@ fn load_csv() -> CsvData {
             std::process::exit(1);
         });
         // Transcode non-UTF-8 files; for UTF-8, drop the buffer and re-open to reduce peak memory
-        match decode_to_utf8(&bytes) {
+        let reader: Box<dyn std::io::Read> = match decode_to_utf8(&bytes) {
             Some(Ok(t)) => {
-                return CsvData::from_reader(Cursor::new(t)).unwrap_or_else(|e| {
-                    eprintln!("Error: failed to parse '{}': {}", path, e);
-                    eprintln!("Supported formats: .csv, .xlsx, .xls");
-                    std::process::exit(1);
-                });
+                drop(bytes);
+                Box::new(Cursor::new(t))
             }
             Some(Err(e)) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
-            None => {
-                drop(bytes);
-                let file = std::fs::File::open(path).unwrap_or_else(|e| {
-                    eprintln!("Error: cannot open '{}': {}", path, e);
-                    std::process::exit(1);
-                });
-                return CsvData::from_reader(file).unwrap_or_else(|e| {
-                    eprintln!("Error: failed to parse '{}': {}", path, e);
-                    eprintln!("Supported formats: .csv, .xlsx, .xls");
-                    std::process::exit(1);
-                });
-            }
-        }
+            // UTF-8: try to re-open the file so we can drop the buffer before parsing.
+            // Falls back to the in-memory buffer if re-open fails (e.g. file deleted).
+            None => match std::fs::File::open(path) {
+                Ok(file) => {
+                    drop(bytes);
+                    Box::new(file)
+                }
+                Err(_) => Box::new(Cursor::new(bytes)),
+            },
+        };
+        return CsvData::from_reader(reader).unwrap_or_else(|e| {
+            eprintln!("Error: failed to parse '{}': {}", path, e);
+            eprintln!("Supported formats: .csv, .xlsx, .xls");
+            std::process::exit(1);
+        });
     }
 
     // Fall back to stdin when piped

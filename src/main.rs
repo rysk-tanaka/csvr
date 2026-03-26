@@ -47,20 +47,32 @@ fn load_csv() -> CsvData {
             eprintln!("Error: cannot open '{}': {}", path, e);
             std::process::exit(1);
         });
-        // Reuse the original buffer when already UTF-8; allocate a new one only when transcoding is needed
-        let transcoded = match decode_to_utf8(&bytes) {
-            Some(Ok(t)) => t,
+        // Transcode non-UTF-8 files; for UTF-8, drop the buffer and re-open to reduce peak memory
+        match decode_to_utf8(&bytes) {
+            Some(Ok(t)) => {
+                return CsvData::from_reader(Cursor::new(t)).unwrap_or_else(|e| {
+                    eprintln!("Error: failed to parse '{}': {}", path, e);
+                    eprintln!("Supported formats: .csv, .xlsx, .xls");
+                    std::process::exit(1);
+                });
+            }
             Some(Err(e)) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
-            None => bytes,
-        };
-        return CsvData::from_reader(Cursor::new(transcoded)).unwrap_or_else(|e| {
-            eprintln!("Error: failed to parse '{}': {}", path, e);
-            eprintln!("Supported formats: .csv, .xlsx, .xls");
-            std::process::exit(1);
-        });
+            None => {
+                drop(bytes);
+                let file = std::fs::File::open(path).unwrap_or_else(|e| {
+                    eprintln!("Error: cannot open '{}': {}", path, e);
+                    std::process::exit(1);
+                });
+                return CsvData::from_reader(file).unwrap_or_else(|e| {
+                    eprintln!("Error: failed to parse '{}': {}", path, e);
+                    eprintln!("Supported formats: .csv, .xlsx, .xls");
+                    std::process::exit(1);
+                });
+            }
+        }
     }
 
     // Fall back to stdin when piped

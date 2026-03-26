@@ -47,16 +47,27 @@ fn load_csv() -> CsvData {
             eprintln!("Error: cannot open '{}': {}", path, e);
             std::process::exit(1);
         });
-        // Reuse the original buffer when already UTF-8; allocate a new one only when transcoding is needed
-        let transcoded = match decode_to_utf8(&bytes) {
-            Some(Ok(t)) => t,
+        // Transcode non-UTF-8 files; for UTF-8, drop the buffer and re-open to reduce peak memory
+        let reader: Box<dyn std::io::Read> = match decode_to_utf8(&bytes) {
+            Some(Ok(t)) => {
+                drop(bytes);
+                Box::new(Cursor::new(t))
+            }
             Some(Err(e)) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
-            None => bytes,
+            // UTF-8: try to re-open the file so we can drop the buffer before parsing.
+            // Falls back to the in-memory buffer if re-open fails (e.g. file deleted).
+            None => match std::fs::File::open(path) {
+                Ok(file) => {
+                    drop(bytes);
+                    Box::new(file)
+                }
+                Err(_) => Box::new(Cursor::new(bytes)),
+            },
         };
-        return CsvData::from_reader(Cursor::new(transcoded)).unwrap_or_else(|e| {
+        return CsvData::from_reader(reader).unwrap_or_else(|e| {
             eprintln!("Error: failed to parse '{}': {}", path, e);
             eprintln!("Supported formats: .csv, .xlsx, .xls");
             std::process::exit(1);

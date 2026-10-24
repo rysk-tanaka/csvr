@@ -13,7 +13,7 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
-    uses: rysk-tanaka/workflows/.github/workflows/claude-code-review.yml@fc378b25a49b87941e7030b05944ba16aa1629d7 # main
+    uses: rysk-tanaka/workflows/.github/workflows/claude-code-review.yml@0ed8310f0b190bd5bbc1de3d8475c2fae639fa79 # main
     with:
       track_progress: ${{ github.event.action != 'labeled' }}
     secrets:

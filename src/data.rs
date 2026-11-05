@@ -192,9 +192,9 @@ pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<Vec<u8>, String>> {
         return None;
     }
 
-    let mut detector = chardetng::EncodingDetector::new();
+    let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     detector.feed(bytes, true);
-    let encoding = detector.guess(None, true);
+    let encoding = detector.guess(None, chardetng::Utf8Detection::Allow);
 
     let (decoded, _, had_errors) = encoding.decode(bytes);
     if had_errors {

@@ -45,6 +45,9 @@ const ROW_SELECTED_BG: u32 = 0x313244; // Surface0 — selected row
 const CELL_SELECTED_BG: u32 = 0x45475a; // Surface1 — selected cell
 const STATUS_BG: u32 = HEADER_BG;
 const TEXT_ERROR: u32 = 0xf38ba8; // Catppuccin Red
+/// Separates clipped columns from the row numbers, where a cut-off value can read as part of the
+/// number. Counted in the content width so the last column still reaches the right edge.
+const PINNED_BORDER_WIDTH: f32 = 1.0;
 
 #[derive(IntoElement)]
 struct TableRow {
@@ -106,6 +109,9 @@ impl RenderOnce for TableRow {
             .flex_row()
             .flex_shrink_0()
             .ml(-h_offset)
+            .border_r(px(PINNED_BORDER_WIDTH))
+            .border_color(rgb(BORDER_COLOR))
+            .py_0p5()
             .child({
                 let entity = entity.clone();
                 div()
@@ -133,19 +139,25 @@ impl RenderOnce for TableRow {
 
         // Scrollable section: clipped to the area right of the pinned section, so its cells never
         // overlap the pinned section on screen or under the mouse.
-        let scrollable_div = div().flex_1().flex().flex_row().overflow_hidden().child(
-            div()
-                .flex()
-                .flex_row()
-                .flex_shrink_0()
-                .ml(h_offset)
-                .children(
-                    self.visible_col_indices
-                        .iter()
-                        .skip(pinned_count)
-                        .map(|&col_idx| make_cell(col_idx, entity.clone())),
-                ),
-        );
+        let scrollable_div = div()
+            .flex_1()
+            .flex()
+            .flex_row()
+            .overflow_hidden()
+            .py_0p5()
+            .child(
+                div()
+                    .flex()
+                    .flex_row()
+                    .flex_shrink_0()
+                    .ml(h_offset)
+                    .children(
+                        self.visible_col_indices
+                            .iter()
+                            .skip(pinned_count)
+                            .map(|&col_idx| make_cell(col_idx, entity.clone())),
+                    ),
+            );
 
         div()
             .id(("row", ix))
@@ -158,7 +170,6 @@ impl RenderOnce for TableRow {
             .when(!is_row_selected, |el| {
                 el.hover(|style| style.bg(rgb(ROW_HOVER_BG)))
             })
-            .py_0p5()
             .child(pinned_div)
             .child(scrollable_div)
     }
@@ -680,6 +691,7 @@ impl Render for CsvrApp {
         let entity = cx.entity();
         let viewport_width = window.viewport_size().width.as_f32();
         let content_width = self.row_num_width
+            + PINNED_BORDER_WIDTH
             + self
                 .visible_col_indices
                 .iter()
@@ -900,7 +912,6 @@ impl Render for CsvrApp {
                     .border_color(rgb(BORDER_COLOR))
                     .bg(rgb(HEADER_BG))
                     .text_color(rgb(TEXT_SUBTEXT))
-                    .py_1()
                     .text_xs()
                     .font_weight(gpui::FontWeight::BOLD)
                     // Inner row: pinned section + scrollable section
@@ -954,6 +965,9 @@ impl Render for CsvrApp {
                             .flex()
                             .flex_row()
                             .flex_shrink_0()
+                            .border_r(px(PINNED_BORDER_WIDTH))
+                            .border_color(rgb(BORDER_COLOR))
+                            .py_1()
                             .child(
                                 div()
                                     .w(px(self.row_num_width))
@@ -970,8 +984,13 @@ impl Render for CsvrApp {
                             );
 
                         // Scrollable section: clipped the same way as in TableRow
-                        let scrollable_div =
-                            div().flex_1().flex().flex_row().overflow_hidden().child(
+                        let scrollable_div = div()
+                            .flex_1()
+                            .flex()
+                            .flex_row()
+                            .overflow_hidden()
+                            .py_1()
+                            .child(
                                 div()
                                     .flex()
                                     .flex_row()

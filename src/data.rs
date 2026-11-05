@@ -184,7 +184,7 @@ impl CsvData {
 }
 
 /// Detect encoding and decode bytes to UTF-8.
-/// Returns `None` if already valid UTF-8 (no conversion needed).
+/// Returns `None` if no conversion is needed: valid UTF-8 that is not ISO-2022-JP.
 /// Returns `Some(Ok(decoded_bytes))` on successful transcoding. Input that looks like damaged
 /// UTF-8 (see `is_damaged_utf8`) has its invalid bytes replaced with U+FFFD. A warning goes to
 /// stderr for that replacement and whenever non-UTF-8 input is decoded with a guessed encoding.

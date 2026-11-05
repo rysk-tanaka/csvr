@@ -9,10 +9,10 @@ use regex::RegexBuilder;
 
 use crate::chart::{CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart};
 use crate::compute::{
-    ColumnStats, compute_column_stats, compute_column_widths, compute_histogram_bins,
-    compute_numeric_columns, downsample, export_json, export_markdown, extract_column_values,
-    extract_scatter_pairs, filter_columns_by_regex, filter_rows, filter_rows_regex,
-    parse_column_filter, row_number_col_width, sort_indices,
+    ColumnStats, clamp_h_offset, compute_column_stats, compute_column_widths,
+    compute_histogram_bins, compute_numeric_columns, downsample, export_json, export_markdown,
+    extract_column_values, extract_scatter_pairs, filter_columns_by_regex, filter_rows,
+    filter_rows_regex, parse_column_filter, row_number_col_width, sort_indices,
 };
 use crate::data::{CHART_TYPES, ChartData, ChartType, CsvData, SortDirection};
 
@@ -53,7 +53,7 @@ struct TableRow {
     cells: Rc<Vec<String>>,
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
-    min_row_width: gpui::Pixels,
+    row_width: gpui::Pixels,
     /// None = not selected, Some(None) = entire row selected, Some(Some(c)) = cell c selected
     selected_col: Option<Option<usize>>,
     entity: Entity<CsvrApp>,
@@ -100,9 +100,7 @@ impl RenderOnce for TableRow {
                 .child(text)
         };
 
-        // Pinned section: row number + pinned columns, always offset to keep row numbers fixed.
-        // Each pinned cell has its own bg to cover scrollable content behind it, which means
-        // the parent hover bg does not show through on pinned cells (known GPUI trade-off).
+        // Pinned section: row number + pinned columns, offset to cancel the list's horizontal shift.
         let pinned_div = div()
             .flex()
             .flex_row()
@@ -115,9 +113,6 @@ impl RenderOnce for TableRow {
                     .w(px(self.row_num_width))
                     .flex_shrink_0()
                     .px_1()
-                    // bg covers scrollable content that slides behind this cell via ml(-h_offset).
-                    // Trade-off: parent hover highlight doesn't reach through this bg (GPUI limitation).
-                    .bg(rgb(bg))
                     .text_color(rgb(TEXT_SUBTEXT))
                     .text_right()
                     .cursor_pointer()
@@ -133,27 +128,30 @@ impl RenderOnce for TableRow {
                 self.visible_col_indices
                     .iter()
                     .take(pinned_count)
-                    .map(|&col_idx| {
-                        let is_selected = matches!(selected_col, Some(Some(c)) if c == col_idx);
-                        // bg covers scrollable content behind pinned cells; skip when selected
-                        // so CELL_SELECTED_BG (set inside make_cell) is not overwritten.
-                        make_cell(col_idx, entity.clone()).when(!is_selected, |el| el.bg(rgb(bg)))
-                    }),
+                    .map(|&col_idx| make_cell(col_idx, entity.clone())),
             );
 
-        // Scrollable section: non-pinned columns (flows naturally with h_offset)
-        let scrollable_div = div().flex().flex_row().children(
-            self.visible_col_indices
-                .iter()
-                .skip(pinned_count)
-                .map(|&col_idx| make_cell(col_idx, entity.clone())),
+        // Scrollable section: clipped to the area right of the pinned section, so its cells never
+        // overlap the pinned section on screen or under the mouse.
+        let scrollable_div = div().flex_1().flex().flex_row().overflow_hidden().child(
+            div()
+                .flex()
+                .flex_row()
+                .flex_shrink_0()
+                .ml(h_offset)
+                .children(
+                    self.visible_col_indices
+                        .iter()
+                        .skip(pinned_count)
+                        .map(|&col_idx| make_cell(col_idx, entity.clone())),
+                ),
         );
 
         div()
             .id(("row", ix))
             .flex()
             .flex_row()
-            .min_w(self.min_row_width)
+            .w(self.row_width)
             .border_b_1()
             .border_color(rgb(BORDER_COLOR))
             .bg(rgb(bg))
@@ -680,10 +678,21 @@ impl CsvrApp {
 impl Render for CsvrApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
-        let h_offset = self.h_scroll_offset();
+        let viewport_width = window.viewport_size().width.as_f32();
+        let content_width = self.row_num_width
+            + self
+                .visible_col_indices
+                .iter()
+                .filter_map(|&col_idx| self.col_widths.get(col_idx))
+                .sum::<f32>();
+        let h_offset = px(clamp_h_offset(
+            self.h_scroll_offset().as_f32(),
+            content_width,
+            viewport_width,
+        ));
+        let row_width = px(content_width.max(viewport_width));
         let filtered_count = self.filtered_indices.len();
         let total_count = self.rows.len();
-        let viewport_width = window.viewport_size().width;
 
         div()
             .track_focus(&self.focus_handle(cx))
@@ -945,8 +954,6 @@ impl Render for CsvrApp {
                             .flex()
                             .flex_row()
                             .flex_shrink_0()
-                            .bg(rgb(HEADER_BG))
-                            .ml(-h_offset)
                             .child(
                                 div()
                                     .w(px(self.row_num_width))
@@ -962,18 +969,24 @@ impl Render for CsvrApp {
                                     .map(|&col_idx| make_header_cell(col_idx, entity.clone())),
                             );
 
-                        // Scrollable section: non-pinned header columns
-                        let scrollable_div = div().flex().flex_row().children(
-                            self.visible_col_indices
-                                .iter()
-                                .skip(pinned_count)
-                                .map(|&col_idx| make_header_cell(col_idx, entity.clone())),
-                        );
+                        // Scrollable section: clipped the same way as in TableRow
+                        let scrollable_div =
+                            div().flex_1().flex().flex_row().overflow_hidden().child(
+                                div()
+                                    .flex()
+                                    .flex_row()
+                                    .flex_shrink_0()
+                                    .ml(h_offset)
+                                    .children(
+                                        self.visible_col_indices.iter().skip(pinned_count).map(
+                                            |&col_idx| make_header_cell(col_idx, entity.clone()),
+                                        ),
+                                    ),
+                            );
 
                         div()
                             .flex()
                             .flex_row()
-                            .ml(h_offset)
                             .child(pinned_div)
                             .child(scrollable_div)
                     }),
@@ -1389,7 +1402,7 @@ impl Render for CsvrApp {
                                         cells: this.rows.get(original_idx)?.clone(),
                                         col_widths: this.col_widths.clone(),
                                         row_num_width: this.row_num_width,
-                                        min_row_width: viewport_width,
+                                        row_width,
                                         selected_col,
                                         entity: cx.entity(),
                                         visible_col_indices: this.visible_col_indices.clone(),

@@ -28,6 +28,10 @@ paths:
 
 ## ステータスバー
 
+- **読み込み時の警告は表示し続ける** — `CsvData.warnings` を `load_warning` に保持。表示中のデータに関する情報で、起動直後に見逃すことがあるため。stderr には `main` でまとめて出す
+- **操作の結果は一時メッセージ** — `show_status_message` で `status_message` に設定し、`STATUS_MESSAGE_DURATION` のあとで消す。タイマーの `Task` を保持して置き換えると前のタイマーが止まるので、新しいメッセージは全期間表示される。表示欄は 1 つで、一時メッセージを優先し、消えると警告に戻る
+- **エクスポートはデータがなければクリップボードを書き換えない** — 表示列が空、または表示行が 0 件のときは `No data to export` と表示する。`export_json` などはこの場合も `[]` やヘッダーを返すので、`finish_export` で判定する
+- **メッセージと統計は内容の幅に応じて縮める** — どちらも省略表示にする。ウィンドウが狭くても両方の一部が見える。GPUI は `whitespace_nowrap` でも改行で行を分けるので、1 行に保つためにシート名の改行は空白に置き換える
 - **統計は `column_stats_cache` にキャッシュ** — `chart_data_cache` と同様のパターン。`select_cell` / `recompute_filtered_indices` 時にのみ `recompute_column_stats()` で再計算。`render()` ではキャッシュを参照するだけ（ホバーやリサイズによる再描画で O(n) 計算が走るのを防ぐ）
 - **median/stddev の追加で Vec 蓄積が必要に** — median はソートが必須のため単一パスでは不可能。値を `Vec<f64>` に蓄積し、sum/min/max は蓄積と同時に計算。stddev は標本標準偏差（Bessel 補正: `n-1` 除算）、2パス方式（数値安定性のため）。`count == 1` 時は `0.0`。パフォーマンス影響は `recompute_column_stats` がセル選択変更時のみ呼ばれることで限定
 - **表示フォーマット** — 整数値は小数点なし、それ以外は小数4桁。`format_stat()` ヘルパーで統一。閾値は f64 仮数部の精度限界（2^53 ≈ 9.0e15）

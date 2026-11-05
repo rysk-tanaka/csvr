@@ -1,18 +1,19 @@
-use std::{ops::Range, rc::Rc};
+use std::{ops::Range, rc::Rc, time::Duration};
 
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyDownEvent,
-    ListHorizontalSizingBehavior, Render, SharedString, UniformListScrollHandle, Window, actions,
-    canvas, div, prelude::*, px, rgb, uniform_list,
+    ListHorizontalSizingBehavior, Render, SharedString, Task, UniformListScrollHandle, Window,
+    actions, canvas, div, prelude::*, px, rgb, uniform_list,
 };
 use regex::RegexBuilder;
 
 use crate::chart::{CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart};
 use crate::compute::{
     ColumnStats, clamp_h_offset, compute_column_stats, compute_column_widths,
-    compute_histogram_bins, compute_numeric_columns, downsample, export_json, export_markdown,
-    extract_column_values, extract_scatter_pairs, filter_columns_by_regex, filter_rows,
-    filter_rows_regex, h_offset_to_reveal, parse_column_filter, row_number_col_width, sort_indices,
+    compute_histogram_bins, compute_numeric_columns, copied_status_message, downsample,
+    export_json, export_markdown, extract_column_values, extract_scatter_pairs,
+    filter_columns_by_regex, filter_rows, filter_rows_regex, h_offset_to_reveal,
+    parse_column_filter, row_number_col_width, sort_indices,
 };
 use crate::data::{CHART_TYPES, ChartData, ChartType, CsvData, SortDirection};
 
@@ -45,6 +46,8 @@ const ROW_SELECTED_BG: u32 = 0x313244; // Surface0 — selected row
 const CELL_SELECTED_BG: u32 = 0x45475a; // Surface1 — selected cell
 const STATUS_BG: u32 = HEADER_BG;
 const TEXT_ERROR: u32 = 0xf38ba8; // Catppuccin Red
+const TEXT_WARNING: u32 = 0xf9e2af; // Catppuccin Yellow
+const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 /// Separates clipped columns from the row numbers, where a cut-off value can read as part of the
 /// number. Counted in the content width so the last column still reaches the right edge.
 const PINNED_BORDER_WIDTH: f32 = 1.0;
@@ -178,6 +181,11 @@ impl RenderOnce for TableRow {
 pub(crate) struct CsvrApp {
     /// Metadata rows extracted before the promoted header (key-value pairs, section labels, etc.)
     metadata: Vec<Vec<String>>,
+    /// Warnings from loading the input, kept visible because they describe the data on screen
+    load_warning: Option<SharedString>,
+    status_message: Option<SharedString>,
+    /// Replacing this cancels the previous timer, so a newer message keeps its full duration
+    status_message_task: Option<Task<()>>,
     headers: Vec<SharedString>,
     /// Original headers (not uppercased) for regex matching and column filter parsing
     raw_headers: Vec<String>,
@@ -262,8 +270,13 @@ impl CsvrApp {
             .unwrap_or(first_numeric);
         let visible_col_indices = Rc::new((0..col_count).collect());
         let has_metadata = !data.metadata.is_empty();
+        let load_warning =
+            (!data.warnings.is_empty()).then(|| SharedString::from(data.warnings.join("  ")));
         Self {
             metadata: data.metadata,
+            load_warning,
+            status_message: None,
+            status_message_task: None,
             headers,
             raw_headers,
             rows,
@@ -567,28 +580,51 @@ impl CsvrApp {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
-    fn export_json(&self, cx: &mut Context<Self>) {
+    fn export_json(&mut self, cx: &mut Context<Self>) {
         let text = export_json(
             &self.raw_headers,
             &self.rows,
             &self.filtered_indices,
             &self.visible_col_indices,
         );
-        if !text.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
-        }
+        self.finish_export(text, "JSON", cx);
     }
 
-    fn export_markdown(&self, cx: &mut Context<Self>) {
+    fn export_markdown(&mut self, cx: &mut Context<Self>) {
         let text = export_markdown(
             &self.raw_headers,
             &self.rows,
             &self.filtered_indices,
             &self.visible_col_indices,
         );
-        if !text.is_empty() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.finish_export(text, "Markdown", cx);
+    }
+
+    fn finish_export(&mut self, text: String, format_name: &str, cx: &mut Context<Self>) {
+        let row_count = self.filtered_indices.len();
+        // Exports without data still produce text ("[]" or a bare header), which would replace
+        // the clipboard contents with nothing useful.
+        if row_count == 0 || self.visible_col_indices.is_empty() {
+            self.show_status_message("No data to export", cx);
+            return;
         }
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.show_status_message(copied_status_message(format_name, row_count), cx);
+    }
+
+    fn show_status_message(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+        self.status_message = Some(text.into());
+        self.status_message_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(STATUS_MESSAGE_DURATION)
+                .await;
+            this.update(cx, |this, cx| {
+                this.status_message = None;
+                cx.notify();
+            })
+            .ok();
+        }));
+        cx.notify();
     }
 
     fn numeric_col_indices(&self) -> Vec<usize> {
@@ -1489,6 +1525,10 @@ impl Render for CsvrApp {
                         format_stat(stats.stddev),
                     )
                 });
+                let (message, message_color) = match &self.status_message {
+                    Some(message) => (Some(message.clone()), TEXT_MAIN),
+                    None => (self.load_warning.clone(), TEXT_WARNING),
+                };
 
                 div()
                     .w_full()
@@ -1514,10 +1554,31 @@ impl Render for CsvrApp {
                         if pinned > 0 {
                             parts.push(format!("f{}", pinned));
                         }
-                        div().child(parts.join("  "))
+                        div().flex_shrink_0().child(parts.join("  "))
+                    })
+                    // The message and the stats shrink in proportion to their text, so a narrow
+                    // window still shows part of both.
+                    .when_some(message, |el, text| {
+                        el.child(
+                            div()
+                                .flex_grow(1.0)
+                                .mx_2()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .truncate()
+                                .text_color(rgb(message_color))
+                                .child(text),
+                        )
                     })
                     .when_some(stats_text, |el, text| {
-                        el.child(div().text_color(rgb(TEXT_MAIN)).child(text))
+                        el.child(
+                            div()
+                                .overflow_hidden()
+                                .whitespace_nowrap()
+                                .truncate()
+                                .text_color(rgb(TEXT_MAIN))
+                                .child(text),
+                        )
                     })
             })
     }

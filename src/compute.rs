@@ -408,6 +408,11 @@ fn deduplicate_json_keys(headers: &[String], visible_col_indices: &[usize]) -> V
     keys
 }
 
+pub(crate) fn copied_status_message(format_name: &str, row_count: usize) -> String {
+    let unit = if row_count == 1 { "row" } else { "rows" };
+    format!("Copied as {format_name} ({row_count} {unit})")
+}
+
 /// Export visible data as JSON (array of objects).
 pub(crate) fn export_json(
     headers: &[String],
@@ -506,6 +511,7 @@ mod tests {
                 .map(|row| row.iter().map(|s| s.to_string()).collect())
                 .collect(),
             metadata: Vec::new(),
+            warnings: Vec::new(),
         }
     }
 
@@ -1247,6 +1253,21 @@ mod tests {
         let indices = vec![0, 1];
         let result = filter_rows_regex(&rows, &indices, "Tokyo", Some(99)).unwrap();
         assert_eq!(result, Vec::<usize>::new());
+    }
+
+    // --- copied_status_message ---
+
+    #[test]
+    fn copied_status_message_singular() {
+        assert_eq!(copied_status_message("JSON", 1), "Copied as JSON (1 row)");
+    }
+
+    #[test]
+    fn copied_status_message_plural() {
+        assert_eq!(
+            copied_status_message("Markdown", 2),
+            "Copied as Markdown (2 rows)"
+        );
     }
 
     // --- export_json ---

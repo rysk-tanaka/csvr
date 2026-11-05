@@ -44,7 +44,7 @@ src/
   app.rs       -- CsvrApp, TableRow, UIカラー定数, actions!
 ```
 
-1. **データ層** (`data.rs`) — `CsvData` が入力パースを担当。CSV は `csv` クレートで `std::io::Read` から読み込み（`flexible(true)` でフィールド数不揃いを許容）、xlsx/xls は `calamine` クレートで読み込み（`from_xlsx`）。ヘッダーと行データを `Vec<String>` で保持。メタデータ付きCSV（先頭にkey-value形式のメタデータ行がありデータ本体は途中から始まる形式）では、最頻フィールド数を基にデータヘッダーを自動検出・昇格し、元の行を `metadata` フィールドに保持。`decode_to_utf8` で非 UTF-8 ファイルのエンコーディング自動検出・変換（`chardetng` + `encoding_rs`）。`ChartType`, `SortDirection`, `ChartData` の型定義
+1. **データ層** (`data.rs`) — `CsvData` が入力パースを担当。CSV は `csv` クレートで `std::io::Read` から読み込み（`flexible(true)` でフィールド数不揃いを許容）、xlsx/xls は `calamine` クレートで読み込み（`from_xlsx`）。ヘッダーと行データを `Vec<String>` で保持。メタデータ付きCSV（先頭にkey-value形式のメタデータ行がありデータ本体は途中から始まる形式）では、最頻フィールド数を基にデータヘッダーを自動検出・昇格し、元の行を `metadata` フィールドに保持。`decode_to_utf8` で非 UTF-8 ファイルのエンコーディング自動検出・変換（`chardetng` + `encoding_rs`）。読み込み時の警告は `CsvData.warnings` に集めてステータスバーと stderr に出す。`ChartType`, `SortDirection`, `ChartData` の型定義
 2. **計算層** (`compute.rs`) — テスト可能な純粋関数群。列幅算出、行フィルタリング（部分一致・正規表現）、数値列判定、ソート、列フィルタ（正規表現で列名マッチ）、チャート用データ抽出・ダウンサンプリング・ヒストグラムビン計算・列統計（`ColumnStats`: count/sum/min/max/mean/median/stddev — stddev は標本標準偏差）、エクスポート（`export_json` / `export_markdown` — 表示中データをクリップボードコピー用に変換）
 3. **チャート描画** (`chart.rs`) — `draw_chart` 関数。GPUI の `canvas` 要素の paint コールバックから呼ばれる
 4. **UI 層** (`app.rs`) — `CsvrApp`（`Render` トレイト実装）がメインビュー。`TableRow`（`RenderOnce` / `IntoElement`）が個別行。本体は `uniform_list` による仮想スクロール。カラーテーマは Catppuccin Mocha（`BG_BASE`, `TEXT_MAIN` 等の定数で管理）。`/`（検索）・`*`（列フィルタ）・`f`（列固定）・`&`（行フィルタ）の入力モードは排他制御（`any_input_active()` で判定）。`m`（メタデータ表示トグル）は入力モードではなく単純なトグル
@@ -79,5 +79,5 @@ Rust 2024 edition（`edition = "2024"`）を使用。GPUI のバージョンは 
 ## 既知の設計トレードオフ
 
 - **エンコーディング検出とメモリ**: `load_csv` のファイル読み込みは `std::fs::read` で全量バッファリングしてからエンコーディング検出を行う。UTF-8 と判明した場合はバッファを drop しファイルを再オープンしてストリーミング読み込み（再オープン失敗時はバッファにフォールバック）。非 UTF-8 の場合もトランスコード後にバッファを drop。最終メモリ使用量は `CsvData` が全行保持するため変わらないが、ピーク時の同時バッファ保持を回避
-- **不正なバイトを含む入力の扱い**: UTF-8 の BOM がある場合と、3 バイト以上の文字数が不正箇所の 4 倍以上ある場合は UTF-8 とみなして U+FFFD に置き換える。それ以外は正しい Shift_JIS などと区別できないため文字コードの推定に任せ、推定した文字コード名を stderr に出す。短い破損入力は文字化けすることがある
+- **不正なバイトを含む入力の扱い**: UTF-8 の BOM がある場合と、3 バイト以上の文字数が不正箇所の 4 倍以上ある場合は UTF-8 とみなして U+FFFD に置き換える。それ以外は正しい Shift_JIS などと区別できないため文字コードの推定に任せ、推定した文字コード名をステータスバーと stderr に出す。短い破損入力は文字化けすることがある
 - **数値列判定の過半数ベースとソート**: `compute_numeric_columns` は非空値の過半数が `f64` にパース可能なら数値列と判定する。これはメタデータ混在CSVでチャートを利用可能にするための変更だが、通常CSVで混在列（例: `E001, 100, 200`）が意図せず数値ソートされ、テキスト値が `NEG_INFINITY` 扱いで最小値側に配置されるリスクがある

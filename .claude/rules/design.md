@@ -53,10 +53,14 @@ paths:
 
 ## チャート
 
-- **`canvas` 要素で描画** — GPUI の `canvas` は prepaint/paint 2段階のレンダリング。`ChartData` は `chart_data_cache` に保持し、状態変更時のみ `recompute_chart_data()` で再計算。`render()` ではキャッシュを clone して `move` クロージャに渡す
+- **`canvas` 要素で描画** — GPUI の `canvas` は prepaint/paint 2段階のレンダリング。`ChartData` と `ChartAxes` は組にして `chart_data_cache` に保持し、状態変更時のみ `recompute_chart_data()` で再計算。`render()` ではキャッシュを clone して `move` クロージャに渡す
 - **ダウンサンプリング** — Bar: 100点、Line/Scatter: 500点に均等間引きで制限。大量データ時のパフォーマンスを確保
 - **Scatter の X/Y マッチング** — `extract_scatter_pairs` で1回のイテレーションで両列を同時に抽出。両方の列に有効な数値がある行のみプロット
-- **ゼロ除算防止** — Bar/Line/Scatter では全値同一（range == 0）の場合 range を 1.0 にフォールバック。Histogram では全値を中央ビンに配置
+- **ゼロ除算防止** — 全値同一のときは軸の範囲に幅を持たせる。幅は `1.0` と `|v| * 1e-9` の大きい方で、`1e16` のような値でも `hi > lo` を保つ。Histogram では全値を中央ビンに配置し、横軸はその値を中心にした範囲にする
+- **軸の範囲は `compute.rs` で一元化** — `points_axes` / `pairs_axes` / `histogram_axes` が範囲と目盛りのラベルを作り、`draw_chart` はその範囲で描く。目盛りと描画の範囲が食い違わない。`chart` は `compute` に依存しない
+- **目盛りは間引き後の値の範囲** — 描いた点と軸を一致させるため。列全体の正確な値はステータスバーの統計で分かる。Histogram の横軸は全データの範囲。Bar/Line の横軸は値ではないので目盛りを付けない
+- **目盛りのラベルは隣と区別できる桁数** — `format_tick` が間隔から桁数を決める。Histogram の度数は整数のまま出し、最大が奇数なら中央の目盛りを省く
+- **文字は `canvas` の中で描く** — `shape_line` でラベルの幅を測って左の余白を決める。長い列名は `with_content_mask` でチャートの領域に切り取る。`shape_line` は改行を想定しないので、`chart_legend` が改行を空白に置き換える。横軸のラベルは前のラベルと重なるときは描かない（左端は必ず残る）。中央のラベルは右端と重なるときも描かない
 
 ## セル選択
 

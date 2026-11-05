@@ -126,6 +126,22 @@ pub(crate) enum ChartData {
     Pairs(Vec<(f64, f64)>),
 }
 
+/// One axis of a chart: the value range the plot maps to and the labels to draw.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ChartAxis {
+    pub(crate) lo: f64,
+    pub(crate) hi: f64,
+    /// Position from `lo` (0.0) to `hi` (1.0), and the label to draw there.
+    pub(crate) ticks: Vec<(f32, String)>,
+}
+
+/// `x` is `None` when the horizontal axis is not a value (bar and line charts).
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct ChartAxes {
+    pub(crate) y: ChartAxis,
+    pub(crate) x: Option<ChartAxis>,
+}
+
 fn cell_to_string(cell: &calamine::Data) -> String {
     match cell {
         calamine::Data::Empty => String::new(),

@@ -9,13 +9,13 @@ use regex::RegexBuilder;
 
 use crate::chart::{CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart};
 use crate::compute::{
-    ColumnStats, anchored_position, clamp_h_offset, compute_column_stats, compute_column_widths,
-    compute_histogram_bins, compute_numeric_columns, copied_status_message, downsample,
-    export_json, export_markdown, extract_column_values, extract_scatter_pairs,
-    filter_columns_by_regex, filter_rows, filter_rows_regex, h_offset_to_reveal,
-    parse_column_filter, row_number_col_width, sort_indices,
+    ColumnStats, anchored_position, chart_legend, clamp_h_offset, compute_column_stats,
+    compute_column_widths, compute_histogram_bins, compute_numeric_columns, copied_status_message,
+    downsample, export_json, export_markdown, extract_column_values, extract_scatter_pairs,
+    filter_columns_by_regex, filter_rows, filter_rows_regex, h_offset_to_reveal, histogram_axes,
+    pairs_axes, parse_column_filter, points_axes, row_number_col_width, sort_indices,
 };
-use crate::data::{CHART_TYPES, ChartData, ChartType, CsvData, SortDirection};
+use crate::data::{CHART_TYPES, ChartAxes, ChartData, ChartType, CsvData, SortDirection};
 
 actions!(
     csvr,
@@ -207,7 +207,7 @@ pub(crate) struct CsvrApp {
     chart_type: ChartType,
     chart_col: usize,
     chart_x_col: usize,
-    chart_data_cache: Option<ChartData>,
+    chart_data_cache: Option<(ChartData, ChartAxes)>,
     /// Selected cell: (filtered_index, column). column=None means entire row.
     selected_cell: Option<(usize, Option<usize>)>,
     column_stats_cache: Option<ColumnStats>,
@@ -465,16 +465,21 @@ impl CsvrApp {
         self.chart_data_cache = Some(match self.chart_type {
             ChartType::Bar => {
                 let sampled = downsample(&y_values, 100);
-                ChartData::Points(sampled.into_iter().map(|(_, v)| v).collect())
+                let values: Vec<f64> = sampled.into_iter().map(|(_, v)| v).collect();
+                let axes = points_axes(&values, true);
+                (ChartData::Points(values), axes)
             }
             ChartType::Line => {
                 let sampled = downsample(&y_values, 500);
-                ChartData::Points(sampled.into_iter().map(|(_, v)| v).collect())
+                let values: Vec<f64> = sampled.into_iter().map(|(_, v)| v).collect();
+                let axes = points_axes(&values, false);
+                (ChartData::Points(values), axes)
             }
             ChartType::Histogram => {
                 let vals: Vec<f64> = y_values.iter().map(|(_, v)| *v).collect();
                 let bins = compute_histogram_bins(&vals, 30);
-                ChartData::Bins(bins)
+                let axes = histogram_axes(&vals, &bins);
+                (ChartData::Bins(bins), axes)
             }
             ChartType::Scatter => {
                 let pairs = extract_scatter_pairs(
@@ -484,7 +489,8 @@ impl CsvrApp {
                     self.chart_col,
                 );
                 let limited = downsample(&pairs, 500);
-                ChartData::Pairs(limited)
+                let axes = pairs_axes(&limited);
+                (ChartData::Pairs(limited), axes)
             }
         });
     }
@@ -1477,17 +1483,20 @@ impl Render for CsvrApp {
                 }
 
                 // Use cached chart data (recomputed on state changes, not every render)
-                let chart_data = match &self.chart_data_cache {
-                    Some(data) => data.clone(),
+                let (chart_data, chart_axes) = match &self.chart_data_cache {
+                    Some(cached) => cached.clone(),
                     None => {
                         debug_assert!(
                             false,
                             "chart_data_cache is None when chart is active with data"
                         );
                         eprintln!("Bug: chart_data_cache is None when chart should have data");
-                        ChartData::Points(Vec::new())
+                        (ChartData::Points(Vec::new()), points_axes(&[], false))
                     }
                 };
+                let header_name = |col: usize| headers.get(col).map(|s| s.as_ref()).unwrap_or("?");
+                let legend =
+                    chart_legend(chart_type, header_name(chart_col), header_name(chart_x_col));
 
                 el.child(toolbar).child(
                     div()
@@ -1498,9 +1507,13 @@ impl Render for CsvrApp {
                         .border_color(rgb(BORDER_COLOR))
                         .child(
                             canvas(
-                                move |bounds, _window, _cx| (bounds, chart_data, chart_type),
-                                move |_bounds, (bounds, data, ct), window, _cx| {
-                                    draw_chart(window, bounds, &data, ct);
+                                move |bounds, _window, _cx| {
+                                    (bounds, chart_data, chart_axes, legend)
+                                },
+                                move |_bounds, (bounds, data, axes, legend), window, cx| {
+                                    draw_chart(
+                                        window, cx, bounds, &data, chart_type, &axes, &legend,
+                                    );
                                 },
                             )
                             .size_full(),

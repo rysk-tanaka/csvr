@@ -6,6 +6,7 @@ license = "MIT"
 
 [dependencies]
 gpui = { git = "https://github.com/zed-industries/zed.git", tag = "v0.233.10" }
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", tag = "v0.233.10", features = ["font-kit"] }
 csv = "1"
 regex = "1.12.3"
 chardetng = "1.0.0"

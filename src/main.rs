@@ -6,9 +6,7 @@ mod data;
 use std::io::Cursor;
 use std::io::IsTerminal;
 
-use gpui::{
-    App, AppContext, Application, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size,
-};
+use gpui::{App, AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
 
 use crate::app::{
     CopySelection, CsvrApp, DismissSearch, ExportJson, ExportMarkdown, ToggleChart, ToggleSearch,
@@ -117,7 +115,7 @@ fn set_dock_icon() {
 
 fn main() {
     let data = load_csv();
-    Application::new().run(|cx: &mut App| {
+    gpui_platform::application().run(|cx: &mut App| {
         set_dock_icon();
         cx.bind_keys([
             KeyBinding::new("cmd-f", ToggleSearch, Some("CsvrApp")),
@@ -136,7 +134,7 @@ fn main() {
             |window, cx| {
                 let entity = cx.new(|cx| CsvrApp::new(data, cx));
                 let focus = entity.read(cx).focus_handle.clone();
-                window.focus(&focus);
+                window.focus(&focus, cx);
                 entity
             },
         )

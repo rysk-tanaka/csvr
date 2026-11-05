@@ -4,7 +4,7 @@
 [![test](https://github.com/rysk-tanaka/csvr/actions/workflows/test.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/test.yml)
 [![build](https://github.com/rysk-tanaka/csvr/actions/workflows/build.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/build.yml)
 [![release](https://img.shields.io/github/v/release/rysk-tanaka/csvr)](https://github.com/rysk-tanaka/csvr/releases/latest)
-[![GPUI](https://img.shields.io/badge/GPUI-v0.233.10-blue)](https://github.com/zed-industries/zed/tree/main/crates/gpui)
+[![GPUI](https://img.shields.io/badge/GPUI-v1.27.0-blue)](https://github.com/zed-industries/zed/tree/main/crates/gpui)
 [![license](https://badgers.space/github/license/rysk-tanaka/csvr?corner_radius=5)](./LICENSE)
 
 > CLI から起動する CSV ビューワー

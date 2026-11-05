@@ -3,7 +3,7 @@ paths:
   - "src/**/*.rs"
 ---
 
-# GPUI API（v0.233.10）
+# GPUI API（v1.27.0）
 
 GPUI のドキュメントは限られている。Zed のソースコード（`~/.cargo/git/checkouts/zed-*/` 以下）が最も信頼できるリファレンス。
 
@@ -91,7 +91,7 @@ impl Focusable for CsvrApp {
 - `uniform_list` の `paint_scroll_listener` は `cx.stop_propagation()` を無条件に呼ぶため、スクロールイベントは親要素に伝播しない
 - 横スクロールを有効にするには `with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)` を使用
 - `overflow_x_scroll()` / `overflow_scroll()` は `StatefulInteractiveElement` トレイトのメソッド。`div()` で使うには先に `.id("name")` を呼ぶ必要がある
-- `UniformListScrollHandle` の水平オフセットを取得する公開 API は存在しない（v0.233.10 時点）。内部フィールド `handle.0.borrow().base_handle.offset().x` への直接アクセスが必要（`h_scroll_offset()` に分離済み）
+- `UniformListScrollHandle` の水平オフセットを取得する公開 API は存在しない（v1.27.0 時点）。内部フィールド `handle.0.borrow().base_handle.offset().x` への直接アクセスが必要（`h_scroll_offset()` に分離済み）
 
 ## 非公開 API の利用ルール
 

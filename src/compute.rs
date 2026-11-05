@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use regex::RegexBuilder;
 
-use crate::data::{CsvData, SortDirection};
+use crate::data::{ChartAxes, ChartAxis, ChartType, CsvData, SortDirection};
 
 /// Pixel width per character (monospace approximation at text_sm)
 pub(crate) const CHAR_WIDTH: f32 = 7.5;
@@ -377,6 +377,120 @@ pub(crate) fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<us
         bins[idx.min(bin_count - 1)] += 1;
     }
     bins
+}
+
+/// Format an axis label with enough digits to tell it from the next tick, half of `range` away.
+pub(crate) fn format_tick(value: f64, range: f64) -> String {
+    let step = range / 2.0;
+    if value.abs() >= 1e12 {
+        let precision = ((value.abs() / step).log10().ceil() + 1.0).clamp(3.0, 16.0) as usize;
+        return format!("{value:.precision$e}");
+    }
+    let decimals = (1.0 - step.log10()).ceil().clamp(0.0, 17.0) as usize;
+    let label = format!("{value:.decimals$}");
+    // Rounding a small negative value leaves "-0".
+    match label.strip_prefix('-') {
+        Some(positive) if positive.parse::<f64>() == Ok(0.0) => positive.to_string(),
+        _ => label,
+    }
+}
+
+fn value_bounds(values: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
+    let (min, max) = values.fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), v| {
+        (min.min(v), max.max(v))
+    });
+    (min <= max).then_some((min, max))
+}
+
+/// Width of the range for all-equal values. It grows with the value because adding 1.0 to a value
+/// like 1e16 would leave it unchanged, and the plot divides by this width.
+fn equal_values_width(value: f64) -> f64 {
+    (value.abs() * 1e-9).max(1.0)
+}
+
+fn empty_axis() -> ChartAxis {
+    ChartAxis {
+        lo: 0.0,
+        hi: 1.0,
+        ticks: Vec::new(),
+    }
+}
+
+fn value_axis(lo: f64, hi: f64) -> ChartAxis {
+    let range = hi - lo;
+    ChartAxis {
+        lo,
+        hi,
+        ticks: [(0.0, lo), (0.5, (lo + hi) / 2.0), (1.0, hi)]
+            .into_iter()
+            .map(|(pos, value)| (pos, format_tick(value, range)))
+            .collect(),
+    }
+}
+
+fn axis_from_bounds(bounds: Option<(f64, f64)>) -> ChartAxis {
+    let Some((lo, hi)) = bounds else {
+        return empty_axis();
+    };
+    if (hi - lo).abs() < f64::EPSILON {
+        return value_axis(lo, lo + equal_values_width(lo));
+    }
+    value_axis(lo, hi)
+}
+
+/// Axes for bar and line charts. Bars start from zero when all values are positive.
+pub(crate) fn points_axes(values: &[f64], include_zero: bool) -> ChartAxes {
+    let bounds = value_bounds(values.iter().copied())
+        .map(|(min, max)| (if include_zero { min.min(0.0) } else { min }, max));
+    ChartAxes {
+        y: axis_from_bounds(bounds),
+        x: None,
+    }
+}
+
+pub(crate) fn pairs_axes(pairs: &[(f64, f64)]) -> ChartAxes {
+    ChartAxes {
+        y: axis_from_bounds(value_bounds(pairs.iter().map(|p| p.1))),
+        x: Some(axis_from_bounds(value_bounds(pairs.iter().map(|p| p.0)))),
+    }
+}
+
+pub(crate) fn histogram_axes(values: &[f64], bins: &[usize]) -> ChartAxes {
+    let max_count = bins.iter().copied().max().unwrap_or(0);
+    let y = if max_count == 0 {
+        empty_axis()
+    } else {
+        // Counts are whole numbers, so skip the middle tick when it would fall between two.
+        let mut ticks = vec![(0.0, "0".to_string())];
+        if max_count % 2 == 0 {
+            ticks.push((0.5, (max_count / 2).to_string()));
+        }
+        ticks.push((1.0, max_count.to_string()));
+        ChartAxis {
+            lo: 0.0,
+            hi: max_count as f64,
+            ticks,
+        }
+    };
+    let x = match value_bounds(values.iter().copied()) {
+        None => empty_axis(),
+        // compute_histogram_bins puts all-equal values in the middle bin.
+        Some((min, max)) if (max - min).abs() < f64::EPSILON => {
+            let half_width = equal_values_width(min) / 2.0;
+            value_axis(min - half_width, min + half_width)
+        }
+        Some((min, max)) => value_axis(min, max),
+    };
+    ChartAxes { y, x: Some(x) }
+}
+
+pub(crate) fn chart_legend(chart_type: ChartType, y_name: &str, x_name: &str) -> String {
+    // shape_line expects a single line.
+    let single_line = |name: &str| name.replace(['\r', '\n'], " ");
+    match chart_type {
+        ChartType::Scatter => format!("Y: {}  X: {}", single_line(y_name), single_line(x_name)),
+        ChartType::Bar | ChartType::Line | ChartType::Histogram => single_line(y_name),
+    }
 }
 
 fn escape_json_string(s: &str) -> String {
@@ -904,6 +1018,127 @@ mod tests {
     fn downsample_empty() {
         let result = downsample(&[] as &[(usize, f64)], 10);
         assert!(result.is_empty());
+    }
+
+    // --- chart axes ---
+
+    fn tick_labels(axis: &crate::data::ChartAxis) -> Vec<&str> {
+        axis.ticks.iter().map(|(_, label)| label.as_str()).collect()
+    }
+
+    #[test]
+    fn format_tick_uses_digits_for_the_tick_spacing() {
+        assert_eq!(format_tick(100.0, 200.0), "100");
+        assert_eq!(format_tick(1.5, 3.0), "1.5");
+        assert_eq!(format_tick(0.5, 1.0), "0.50");
+    }
+
+    #[test]
+    fn format_tick_has_no_negative_zero() {
+        assert_eq!(format_tick(-0.3, 200.0), "0");
+    }
+
+    #[test]
+    fn format_tick_uses_exponent_for_large_values() {
+        assert_eq!(format_tick(2e12, 1e12), "2.000e12");
+    }
+
+    #[test]
+    fn format_tick_tells_close_values_apart() {
+        assert_eq!(format_tick(1e12 + 2.0, 2.0), "1.00000000000200e12");
+        assert_eq!(format_tick(1.000000005, 1e-8), "1.0000000050");
+    }
+
+    #[test]
+    fn points_axes_includes_zero_for_bars() {
+        let axes = points_axes(&[1.0, 3.0], true);
+        assert_eq!((axes.y.lo, axes.y.hi), (0.0, 3.0));
+        assert_eq!(axes.x, None);
+    }
+
+    #[test]
+    fn points_axes_uses_value_range_for_lines() {
+        let axes = points_axes(&[1.0, 3.0], false);
+        assert_eq!((axes.y.lo, axes.y.hi), (1.0, 3.0));
+        assert_eq!(tick_labels(&axes.y), ["1.0", "2.0", "3.0"]);
+    }
+
+    #[test]
+    fn points_axes_widens_equal_values() {
+        let axes = points_axes(&[5.0, 5.0], false);
+        assert_eq!((axes.y.lo, axes.y.hi), (5.0, 6.0));
+    }
+
+    #[test]
+    fn points_axes_widens_large_equal_values() {
+        let axes = points_axes(&[1e16, 1e16], false);
+        assert!(axes.y.hi > axes.y.lo);
+    }
+
+    #[test]
+    fn points_axes_keeps_negative_range_for_bars() {
+        let axes = points_axes(&[-3.0, -1.0], true);
+        assert_eq!((axes.y.lo, axes.y.hi), (-3.0, -1.0));
+    }
+
+    #[test]
+    fn points_axes_without_values_has_no_ticks() {
+        assert!(points_axes(&[], false).y.ticks.is_empty());
+    }
+
+    #[test]
+    fn pairs_axes_uses_x_and_y_ranges() {
+        let axes = pairs_axes(&[(0.0, 10.0), (2.0, 20.0)]);
+        let x = axes.x.expect("scatter has an x axis");
+        assert_eq!((x.lo, x.hi), (0.0, 2.0));
+        assert_eq!((axes.y.lo, axes.y.hi), (10.0, 20.0));
+    }
+
+    #[test]
+    fn histogram_axes_labels_even_max_count() {
+        let axes = histogram_axes(&[0.0, 10.0], &[2, 0]);
+        assert_eq!((axes.y.lo, axes.y.hi), (0.0, 2.0));
+        assert_eq!(tick_labels(&axes.y), ["0", "1", "2"]);
+        let x = axes.x.expect("histogram has an x axis");
+        assert_eq!((x.lo, x.hi), (0.0, 10.0));
+    }
+
+    #[test]
+    fn histogram_axes_skips_middle_tick_for_odd_max_count() {
+        let axes = histogram_axes(&[0.0, 10.0], &[3, 0]);
+        assert_eq!(tick_labels(&axes.y), ["0", "3"]);
+    }
+
+    #[test]
+    fn histogram_axes_centers_equal_values() {
+        let x = histogram_axes(&[4.0, 4.0], &[0, 2])
+            .x
+            .expect("histogram has an x axis");
+        assert_eq!((x.lo, x.hi), (3.5, 4.5));
+    }
+
+    #[test]
+    fn histogram_axes_widens_large_equal_values() {
+        let x = histogram_axes(&[1e16, 1e16], &[0, 2])
+            .x
+            .expect("histogram has an x axis");
+        assert!(x.hi > x.lo);
+    }
+
+    #[test]
+    fn histogram_axes_without_values_has_no_ticks() {
+        let axes = histogram_axes(&[], &[0, 0]);
+        assert!(axes.y.ticks.is_empty());
+        assert!(axes.x.expect("histogram has an x axis").ticks.is_empty());
+    }
+
+    #[test]
+    fn chart_legend_uses_single_line_names() {
+        assert_eq!(chart_legend(ChartType::Line, "A\nB", "C"), "A B");
+        assert_eq!(
+            chart_legend(ChartType::Scatter, "A", "B\nC"),
+            "Y: A  X: B C"
+        );
     }
 
     // --- compute_histogram_bins ---

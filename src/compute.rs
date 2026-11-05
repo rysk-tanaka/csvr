@@ -66,6 +66,24 @@ pub(crate) fn h_offset_to_reveal(
     }
 }
 
+/// Position in `new` to show at the top of the view when the filtered rows change from `old`:
+/// the first row at or after `old[top]` that is still in `new`, or the last row of `new` if
+/// there is none. Returns `None` if either list is empty, since there is nothing to keep.
+pub(crate) fn anchored_position(old: &[usize], new: &[usize], top: usize) -> Option<usize> {
+    if old.is_empty() {
+        return None;
+    }
+    let positions: HashMap<usize, usize> = new
+        .iter()
+        .enumerate()
+        .map(|(pos, &row)| (row, pos))
+        .collect();
+    old.iter()
+        .skip(top)
+        .find_map(|row| positions.get(row).copied())
+        .or_else(|| new.len().checked_sub(1))
+}
+
 pub(crate) fn filter_rows(rows: &[Rc<Vec<String>>], query: &str) -> Vec<usize> {
     if query.is_empty() {
         return (0..rows.len()).collect();
@@ -1207,6 +1225,45 @@ mod tests {
     }
 
     // --- filter_rows_regex ---
+
+    #[test]
+    fn anchored_position_keeps_unchanged_rows() {
+        assert_eq!(
+            anchored_position(&[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], 2),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn anchored_position_moves_to_next_remaining_row() {
+        assert_eq!(anchored_position(&[0, 1, 2, 3, 4], &[1, 3, 4], 2), Some(1));
+    }
+
+    #[test]
+    fn anchored_position_falls_back_to_last_row() {
+        assert_eq!(anchored_position(&[0, 1, 2, 3, 4], &[0, 1], 3), Some(1));
+    }
+
+    #[test]
+    fn anchored_position_follows_row_when_widening() {
+        assert_eq!(anchored_position(&[1, 3], &[0, 1, 2, 3, 4], 1), Some(3));
+    }
+
+    #[test]
+    fn anchored_position_uses_sorted_order() {
+        assert_eq!(anchored_position(&[4, 3, 2, 1, 0], &[0, 2, 4], 1), Some(1));
+    }
+
+    #[test]
+    fn anchored_position_without_rows_to_keep() {
+        assert_eq!(anchored_position(&[0, 1], &[], 0), None);
+        assert_eq!(anchored_position(&[], &[0, 1], 0), None);
+    }
+
+    #[test]
+    fn anchored_position_with_out_of_range_top() {
+        assert_eq!(anchored_position(&[0, 1], &[0, 1], 9), Some(1));
+    }
 
     #[test]
     fn filter_rows_regex_basic() {

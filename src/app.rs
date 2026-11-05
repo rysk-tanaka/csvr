@@ -9,7 +9,7 @@ use regex::RegexBuilder;
 
 use crate::chart::{CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart};
 use crate::compute::{
-    ColumnStats, clamp_h_offset, compute_column_stats, compute_column_widths,
+    ColumnStats, anchored_position, clamp_h_offset, compute_column_stats, compute_column_widths,
     compute_histogram_bins, compute_numeric_columns, copied_status_message, downsample,
     export_json, export_markdown, extract_column_values, extract_scatter_pairs,
     filter_columns_by_regex, filter_rows, filter_rows_regex, h_offset_to_reveal,
@@ -195,6 +195,9 @@ pub(crate) struct CsvrApp {
     row_num_width: f32,
     scroll_handle: UniformListScrollHandle,
     visible_range: Range<usize>,
+    /// The rows and top position from before the filter results became empty. GPUI resets the
+    /// offset of an empty list, so this is what lets the view return when the results come back.
+    rows_before_empty: Option<(Vec<usize>, usize)>,
     search_active: bool,
     search_query: String,
     filtered_indices: Vec<usize>,
@@ -285,6 +288,7 @@ impl CsvrApp {
             row_num_width,
             scroll_handle: UniformListScrollHandle::new(),
             visible_range: 0..0,
+            rows_before_empty: None,
             search_active: false,
             search_query: String::new(),
             filtered_indices: (0..total_rows).collect(),
@@ -352,11 +356,42 @@ impl CsvrApp {
         }
     }
 
+    /// Re-filter after a `/` or `&` query change, keeping the view on the same rows where possible.
+    fn refilter_keeping_position(&mut self) {
+        let (previous, top) = if self.filtered_indices.is_empty() {
+            self.rows_before_empty.take().unwrap_or_default()
+        } else {
+            (
+                std::mem::take(&mut self.filtered_indices),
+                self.visible_range.start,
+            )
+        };
+        let selected = self
+            .selected_cell
+            .and_then(|(row, col)| Some((*previous.get(row)?, col)));
+
+        self.recompute_filtered_indices();
+
+        if let Some((row, col)) = selected
+            && let Some(pos) = self.filtered_indices.iter().position(|&r| r == row)
+        {
+            self.selected_cell = Some((pos, col));
+            self.recompute_column_stats();
+        }
+        if let Some(pos) = anchored_position(&previous, &self.filtered_indices, top) {
+            self.scroll_handle
+                .scroll_to_item_strict(pos, gpui::ScrollStrategy::Top);
+            // The list only updates this when it renders, and another key can arrive before that.
+            self.visible_range = pos..pos + self.visible_range.len();
+        }
+        if self.filtered_indices.is_empty() {
+            self.rows_before_empty = Some((previous, top));
+        }
+    }
+
     fn set_search_query(&mut self, query: String) {
         self.search_query = query;
-        self.recompute_filtered_indices();
-        self.scroll_handle
-            .scroll_to_item(0, gpui::ScrollStrategy::Top);
+        self.refilter_keeping_position();
     }
 
     fn toggle_sort(&mut self, col: usize) {
@@ -367,6 +402,8 @@ impl CsvrApp {
             Some((c, SortDirection::Descending)) if c == col => None,
             _ => Some((col, SortDirection::Ascending)),
         };
+        // The saved order no longer matches the sorted rows.
+        self.rows_before_empty = None;
         self.recompute_filtered_indices();
         self.scroll_handle
             .scroll_to_item(0, gpui::ScrollStrategy::Top);
@@ -736,9 +773,7 @@ impl CsvrApp {
         self.row_filter_query = query;
         self.row_filter_col = col;
         self.row_filter_pattern = pattern;
-        self.recompute_filtered_indices();
-        self.scroll_handle
-            .scroll_to_item(0, gpui::ScrollStrategy::Top);
+        self.refilter_keeping_position();
     }
 
     fn close_row_filter(&mut self) {

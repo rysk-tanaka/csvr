@@ -185,25 +185,75 @@ impl CsvData {
 
 /// Detect encoding and decode bytes to UTF-8.
 /// Returns `None` if already valid UTF-8 (no conversion needed).
-/// Returns `Some(Ok(decoded_bytes))` on successful transcoding.
+/// Returns `Some(Ok(decoded_bytes))` on successful transcoding. Input that looks like damaged
+/// UTF-8 (see `is_damaged_utf8`) has its invalid bytes replaced with U+FFFD. A warning goes to
+/// stderr for that replacement and whenever non-UTF-8 input is decoded with a guessed encoding.
 /// Returns `Some(Err(msg))` if the detected encoding cannot losslessly decode the input.
 pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<Vec<u8>, String>> {
-    if std::str::from_utf8(bytes).is_ok() {
+    let is_valid_utf8 = std::str::from_utf8(bytes).is_ok();
+    // ISO-2022-JP is 7-bit with escape sequences, so it also passes UTF-8 validation.
+    let may_be_iso_2022_jp = bytes.is_ascii() && bytes.contains(&0x1B);
+    if is_valid_utf8 && !may_be_iso_2022_jp {
         return None;
+    }
+
+    if !is_valid_utf8 && is_damaged_utf8(bytes) {
+        eprintln!("Warning: input contains invalid UTF-8 bytes; replaced with U+FFFD");
+        return Some(Ok(String::from_utf8_lossy(bytes).into_owned().into_bytes()));
     }
 
     let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
     detector.feed(bytes, true);
-    let encoding = detector.guess(None, chardetng::Utf8Detection::Allow);
+    let guessed = detector.guess(None, chardetng::Utf8Detection::Allow);
+    // Escape sequences alone do not imply ISO-2022-JP (e.g. ANSI colors in a UTF-8 file).
+    if is_valid_utf8 && guessed != encoding_rs::ISO_2022_JP {
+        return None;
+    }
 
-    let (decoded, _, had_errors) = encoding.decode(bytes);
+    let (decoded, actual_encoding, had_errors) = guessed.decode(bytes);
     if had_errors {
         return Some(Err(format!(
             "failed to decode input: detected encoding {} produced invalid characters",
-            encoding.name()
+            actual_encoding.name()
         )));
     }
+    if !is_valid_utf8 {
+        // The guess can be wrong, so make it visible rather than silently showing mojibake.
+        eprintln!(
+            "Warning: input is not valid UTF-8; decoded as {}",
+            actual_encoding.name()
+        );
+    }
     Some(Ok(decoded.into_owned().into_bytes()))
+}
+
+/// Valid legacy text can form a few UTF-8 sequences by accident (EUC-JP `高橋` is `B9 E2 B6 B6`:
+/// one 3-byte character and one invalid sequence), so one wide character per invalid sequence
+/// is not enough evidence of UTF-8.
+const MIN_WIDE_CHARS_PER_INVALID_SEQUENCE: usize = 4;
+
+/// Whether invalid input is more likely damaged UTF-8 than text in another encoding.
+///
+/// Only characters of 3 or more bytes count: half-width kana in Shift_JIS forms valid 2-byte
+/// UTF-8 such as `C3 BD`, while Japanese text in UTF-8 reaches the ratio within a few lines.
+/// Truncated input gets no exception, because Shift_JIS `齊木` (`EA 8E 96 D8`) without a trailing
+/// newline is indistinguishable from truncated UTF-8.
+fn is_damaged_utf8(bytes: &[u8]) -> bool {
+    // With a UTF-8 BOM, `Encoding::decode` always selects UTF-8 and would reject the input.
+    // The BOM survives replacement, and the CSV reader strips it later.
+    if bytes.starts_with(b"\xEF\xBB\xBF") {
+        return true;
+    }
+
+    let mut wide_chars = 0;
+    let mut invalid_sequences = 0;
+    for chunk in bytes.utf8_chunks() {
+        wide_chars += chunk.valid().chars().filter(|c| c.len_utf8() >= 3).count();
+        if !chunk.invalid().is_empty() {
+            invalid_sequences += 1;
+        }
+    }
+    wide_chars >= invalid_sequences * MIN_WIDE_CHARS_PER_INVALID_SEQUENCE
 }
 
 #[cfg(test)]
@@ -379,10 +429,107 @@ mod tests {
         // Whether the result is Ok or Err depends on chardetng's encoding guess,
         // which is non-deterministic for short/ambiguous inputs. This test verifies
         // the function does not panic and returns Some (not None).
-        // The Some(Err) path (had_errors == true) is difficult to trigger reliably
-        // because chardetng often selects Windows-1252, which accepts all byte values.
         let bytes: Vec<u8> = vec![0xC0, 0xC1];
         let result = decode_to_utf8(&bytes);
         assert!(result.is_some());
+    }
+
+    fn decoded_text(bytes: &[u8]) -> String {
+        let decoded = decode_to_utf8(bytes)
+            .expect("should need conversion")
+            .expect("should decode without errors");
+        String::from_utf8(decoded).unwrap()
+    }
+
+    fn encoded_row(encoding: &'static encoding_rs::Encoding, value: &str) -> Vec<u8> {
+        let (encoded, _, had_unmappable) = encoding.encode(value);
+        assert!(!had_unmappable, "{value} should map to {}", encoding.name());
+        [b"id,name\n1,", encoded.as_ref(), b"\n"].concat()
+    }
+
+    #[test]
+    fn decode_iso_2022_jp() {
+        let input = "名前,年齢\n田中,30\n";
+        let (encoded, _, _) = encoding_rs::ISO_2022_JP.encode(input);
+        assert_eq!(decoded_text(&encoded), input);
+    }
+
+    #[test]
+    fn decode_ansi_escape_passthrough() {
+        assert!(decode_to_utf8(b"a,b\n\x1b[31mred\x1b[0m,1\n").is_none());
+    }
+
+    #[test]
+    fn decode_truncated_utf8_replaces_invalid_bytes() {
+        let input = "名前,年齢\n田中,30\n佐藤".as_bytes();
+        let text = decoded_text(&input[..input.len() - 1]);
+        assert!(text.contains("名前"));
+        assert!(text.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn decode_invalid_byte_in_middle_replaces_invalid_bytes() {
+        let bytes = ["名前".as_bytes(), &[0xFF], ",年齢\n".as_bytes()].concat();
+        let text = decoded_text(&bytes);
+        assert!(text.contains("名前"));
+        assert!(text.contains("年齢"));
+        assert!(text.contains('\u{FFFD}'));
+    }
+
+    #[test]
+    fn short_damaged_utf8_is_left_to_detection() {
+        let input = "id,name\n1,名前".as_bytes();
+        assert!(!is_damaged_utf8(&input[..input.len() - 1]));
+    }
+
+    #[test]
+    fn decode_bom_with_invalid_utf8_replaces_invalid_bytes() {
+        let text = decoded_text(b"\xEF\xBB\xBFid,name\n1,A\xFF\n");
+        assert!(text.contains('\u{FFFD}'));
+        let data = CsvData::from_reader(text.as_bytes()).unwrap();
+        assert_eq!(data.headers[0], "id");
+    }
+
+    #[test]
+    fn decode_shift_jis_is_not_replaced() {
+        let input = "名前,年齢\n田中,30\n";
+        let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode(input);
+        assert_eq!(decoded_text(&encoded), input);
+    }
+
+    #[test]
+    fn half_width_kana_shift_jis_is_not_damaged_utf8() {
+        let (encoded, _, _) = encoding_rs::SHIFT_JIS.encode("id,name\n1,ﾃｽ\n2,ﾃｽﾄ\n");
+        assert!(!is_damaged_utf8(&encoded));
+    }
+
+    #[test]
+    fn accidental_utf8_sequences_are_not_damaged_utf8() {
+        let samples = [
+            (encoding_rs::SHIFT_JIS, "齊藤"),
+            (encoding_rs::EUC_JP, "高橋"),
+            (encoding_rs::GBK, "瑜君"),
+            (encoding_rs::BIG5, "梁雅"),
+        ];
+        for (encoding, value) in samples {
+            let bytes = encoded_row(encoding, value);
+            assert!(!is_damaged_utf8(&bytes), "{} {value}", encoding.name());
+        }
+    }
+
+    #[test]
+    fn shift_jis_resembling_truncated_utf8_is_not_damaged_utf8() {
+        let with_newline = encoded_row(encoding_rs::SHIFT_JIS, "齊木");
+        let without_newline = &with_newline[..with_newline.len() - 1];
+        assert!(!is_damaged_utf8(&with_newline));
+        assert!(!is_damaged_utf8(without_newline));
+    }
+
+    #[test]
+    fn decode_error_names_encoding_selected_by_bom() {
+        let error = decode_to_utf8(&[0xFF, 0xFE, 0x41])
+            .expect("should need conversion")
+            .expect_err("odd UTF-16 input should fail");
+        assert!(error.contains("UTF-16LE"), "{error}");
     }
 }

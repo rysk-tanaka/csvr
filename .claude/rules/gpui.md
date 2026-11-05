@@ -71,7 +71,7 @@ impl Focusable for CsvrApp {
 
 - `AppContext` トレイトは `gpui::prelude::*` に含まれない。`cx.new()` を使うには明示的に `use gpui::AppContext` が必要（`App` 型とは別のトレイト）
 - `Focusable` トレイトは `gpui::prelude::*` に含まれない。明示的に `use gpui::Focusable` が必要
-- `KeyBinding` のコンテキストは `None` にするとグローバル。将来のモーダル追加時に競合するため `Some("CsvrApp")` を推奨
+- `KeyBinding` のコンテキストは `None` にするとグローバル。将来のモーダル追加時に競合するため `Some("CsvrApp")` を推奨。ただし、終了のようにフォーカスに関係なく効かせる操作は `None` にする
 - `on_key_down` はアクションにマッチしなかったキーストロークを処理する。テキスト入力は `keystroke.key_char` から取得
 - macOS の `QuitMode` の既定値は `Explicit`。最後のウィンドウを閉じても終了しないため `LastWindowClosed` を指定する
 

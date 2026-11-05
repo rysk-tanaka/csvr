@@ -34,6 +34,13 @@ pub(crate) fn row_number_col_width(total_rows: usize) -> f32 {
     (digits as f32 * CHAR_WIDTH + ROW_NUM_WIDTH).max(40.0)
 }
 
+/// The list clamps its scroll offset only during prepaint, after the header has been built,
+/// so the header needs the same limit to stay aligned at the right edge.
+pub(crate) fn clamp_h_offset(offset: f32, content_width: f32, viewport_width: f32) -> f32 {
+    let max_scroll = (content_width - viewport_width).max(0.0);
+    offset.clamp(-max_scroll, 0.0)
+}
+
 pub(crate) fn filter_rows(rows: &[Rc<Vec<String>>], query: &str) -> Vec<usize> {
     if query.is_empty() {
         return (0..rows.len()).collect();
@@ -481,6 +488,28 @@ mod tests {
         rows.iter()
             .map(|row| Rc::new(row.iter().map(|s| s.to_string()).collect()))
             .collect()
+    }
+
+    // --- clamp_h_offset ---
+
+    #[test]
+    fn clamp_h_offset_keeps_offset_in_range() {
+        assert_eq!(clamp_h_offset(-100.0, 1000.0, 800.0), -100.0);
+    }
+
+    #[test]
+    fn clamp_h_offset_stops_at_right_edge() {
+        assert_eq!(clamp_h_offset(-500.0, 1000.0, 800.0), -200.0);
+    }
+
+    #[test]
+    fn clamp_h_offset_is_zero_when_content_fits() {
+        assert_eq!(clamp_h_offset(-100.0, 500.0, 800.0), 0.0);
+    }
+
+    #[test]
+    fn clamp_h_offset_stops_at_left_edge() {
+        assert_eq!(clamp_h_offset(10.0, 1000.0, 800.0), 0.0);
     }
 
     // --- compute_column_widths ---

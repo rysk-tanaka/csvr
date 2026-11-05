@@ -46,11 +46,13 @@ fn load_csv() -> CsvData {
             eprintln!("Error: cannot open '{}': {}", path, e);
             std::process::exit(1);
         });
+        let mut decode_warning = None;
         // Transcode non-UTF-8 files; for UTF-8, drop the buffer and re-open to reduce peak memory
         let reader: Box<dyn std::io::Read> = match decode_to_utf8(&bytes) {
-            Some(Ok(t)) => {
+            Some(Ok(decoded)) => {
                 drop(bytes);
-                Box::new(Cursor::new(t))
+                decode_warning = decoded.warning;
+                Box::new(Cursor::new(decoded.bytes))
             }
             Some(Err(e)) => {
                 eprintln!("Error: {}", e);
@@ -66,11 +68,13 @@ fn load_csv() -> CsvData {
                 Err(_) => Box::new(Cursor::new(bytes)),
             },
         };
-        return CsvData::from_reader(reader).unwrap_or_else(|e| {
+        let mut data = CsvData::from_reader(reader).unwrap_or_else(|e| {
             eprintln!("Error: failed to parse '{}': {}", path, e);
             eprintln!("Supported formats: .csv, .xlsx, .xls");
             std::process::exit(1);
         });
+        data.warnings.extend(decode_warning);
+        return data;
     }
 
     // Fall back to stdin when piped
@@ -80,18 +84,20 @@ fn load_csv() -> CsvData {
             eprintln!("Error: failed to read from stdin: {}", e);
             std::process::exit(1);
         });
-        let transcoded = match decode_to_utf8(&bytes) {
-            Some(Ok(t)) => t,
+        let (transcoded, decode_warning) = match decode_to_utf8(&bytes) {
+            Some(Ok(decoded)) => (decoded.bytes, decoded.warning),
             Some(Err(e)) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             }
-            None => bytes,
+            None => (bytes, None),
         };
-        return CsvData::from_reader(Cursor::new(transcoded)).unwrap_or_else(|e| {
+        let mut data = CsvData::from_reader(Cursor::new(transcoded)).unwrap_or_else(|e| {
             eprintln!("Error: failed to parse CSV from stdin: {}", e);
             std::process::exit(1);
         });
+        data.warnings.extend(decode_warning);
+        return data;
     }
 
     print_usage_and_exit("no input provided");
@@ -116,6 +122,9 @@ fn set_dock_icon() {
 
 fn main() {
     let data = load_csv();
+    for warning in &data.warnings {
+        eprintln!("Warning: {warning}");
+    }
     // macOS defaults to QuitMode::Explicit, which would leave the process running after the
     // window closes and keep the launching shell from returning.
     gpui_platform::application()

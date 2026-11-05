@@ -35,6 +35,8 @@ pub(crate) struct CsvData {
     pub(crate) rows: Vec<Vec<String>>,
     /// Original header row + rows before the promoted header (metadata section in files with mixed formats)
     pub(crate) metadata: Vec<Vec<String>>,
+    /// Problems found while loading the input, shown in the status bar and on stderr
+    pub(crate) warnings: Vec<String>,
 }
 
 impl CsvData {
@@ -78,6 +80,7 @@ impl CsvData {
             headers,
             rows,
             metadata,
+            warnings: Vec::new(),
         })
     }
 }
@@ -136,17 +139,31 @@ fn cell_to_string(cell: &calamine::Data) -> String {
         }
         calamine::Data::Int(i) => format!("{}", i),
         calamine::Data::Bool(b) => format!("{}", b),
-        calamine::Data::DateTime(dt) => {
-            dt.as_datetime().map(|d| d.to_string()).unwrap_or_else(|| {
-                let v = dt.as_f64();
-                eprintln!("Warning: could not parse DateTime value {}", v);
-                format!("{}", v)
-            })
-        }
+        calamine::Data::DateTime(dt) => dt
+            .as_datetime()
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| format!("{}", dt.as_f64())),
         calamine::Data::DateTimeIso(s) => s.clone(),
         calamine::Data::DurationIso(s) => s.clone(),
         calamine::Data::Error(e) => format!("{}", e),
     }
+}
+
+/// GPUI breaks lines at newlines even with `whitespace_nowrap`, so they would make the status bar
+/// taller.
+fn empty_sheet_warning(sheet_name: &str) -> String {
+    format!("Sheet '{}' is empty", sheet_name.replace(['\r', '\n'], " "))
+}
+
+/// Reports a single count, because one warning per cell could flood the status bar.
+fn unparsable_datetime_warning<'a>(
+    cells: impl Iterator<Item = &'a calamine::Data>,
+) -> Option<String> {
+    let count = cells
+        .filter(|cell| matches!(cell, calamine::Data::DateTime(dt) if dt.as_datetime().is_none()))
+        .count();
+    (count > 0)
+        .then(|| format!("Date cells that could not be parsed are shown as raw numbers: {count}"))
 }
 
 impl CsvData {
@@ -163,33 +180,42 @@ impl CsvData {
             .worksheet_range(&first_sheet)
             .map_err(|e| format!("failed to read sheet '{}': {}", first_sheet, e))?;
 
+        let mut warnings = Vec::new();
         let mut row_iter = range.rows();
         let headers = row_iter
             .next()
             .map(|row| row.iter().map(cell_to_string).collect())
             .unwrap_or_else(|| {
-                eprintln!("Warning: sheet '{}' is empty", first_sheet);
+                warnings.push(empty_sheet_warning(&first_sheet));
                 vec![]
             });
         let rows = row_iter
             .map(|row| row.iter().map(cell_to_string).collect())
             .collect();
+        warnings.extend(unparsable_datetime_warning(range.rows().flatten()));
 
         Ok(CsvData {
             headers,
             rows,
             metadata: Vec::new(),
+            warnings,
         })
     }
 }
 
+#[derive(Debug)]
+pub(crate) struct DecodedInput {
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) warning: Option<String>,
+}
+
 /// Detect encoding and decode bytes to UTF-8.
 /// Returns `None` if no conversion is needed: valid UTF-8 that is not ISO-2022-JP.
-/// Returns `Some(Ok(decoded_bytes))` on successful transcoding. Input that looks like damaged
-/// UTF-8 (see `is_damaged_utf8`) has its invalid bytes replaced with U+FFFD. A warning goes to
-/// stderr for that replacement and whenever non-UTF-8 input is decoded with a guessed encoding.
+/// Returns `Some(Ok(decoded))` on successful transcoding. Input that looks like damaged UTF-8
+/// (see `is_damaged_utf8`) has its invalid bytes replaced with U+FFFD. `decoded.warning` is set
+/// only for that replacement. A guessed encoding for non-UTF-8 input is printed to stderr instead.
 /// Returns `Some(Err(msg))` if the detected encoding cannot losslessly decode the input.
-pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<Vec<u8>, String>> {
+pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String>> {
     let is_valid_utf8 = std::str::from_utf8(bytes).is_ok();
     // ISO-2022-JP is 7-bit with escape sequences, so it also passes UTF-8 validation.
     let may_be_iso_2022_jp = bytes.is_ascii() && bytes.contains(&0x1B);
@@ -198,8 +224,10 @@ pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<Vec<u8>, String>> {
     }
 
     if !is_valid_utf8 && is_damaged_utf8(bytes) {
-        eprintln!("Warning: input contains invalid UTF-8 bytes; replaced with U+FFFD");
-        return Some(Ok(String::from_utf8_lossy(bytes).into_owned().into_bytes()));
+        return Some(Ok(DecodedInput {
+            bytes: String::from_utf8_lossy(bytes).into_owned().into_bytes(),
+            warning: Some("Input contains invalid UTF-8 bytes; replaced with U+FFFD".to_string()),
+        }));
     }
 
     let mut detector = chardetng::EncodingDetector::new(chardetng::Iso2022JpDetection::Allow);
@@ -218,13 +246,17 @@ pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<Vec<u8>, String>> {
         )));
     }
     if !is_valid_utf8 {
-        // The guess can be wrong, so make it visible rather than silently showing mojibake.
+        // The guess can be wrong, so leave a clue on stderr. It stays out of the status bar because
+        // correctly decoded legacy files would otherwise show a warning every time.
         eprintln!(
-            "Warning: input is not valid UTF-8; decoded as {}",
+            "Warning: Input is not valid UTF-8; decoded as {}",
             actual_encoding.name()
         );
     }
-    Some(Ok(decoded.into_owned().into_bytes()))
+    Some(Ok(DecodedInput {
+        bytes: decoded.into_owned().into_bytes(),
+        warning: None,
+    }))
 }
 
 /// Valid legacy text can form a few UTF-8 sequences by accident (EUC-JP `高橋` is `B9 E2 B6 B6`:
@@ -351,8 +383,66 @@ mod tests {
         let result = decode_to_utf8(&sjis_bytes)
             .unwrap()
             .expect("should transcode without errors");
-        let decoded = std::str::from_utf8(&result).unwrap();
+        let decoded = std::str::from_utf8(&result.bytes).unwrap();
         assert!(decoded.contains("名前"));
+        assert!(result.warning.is_none());
+    }
+
+    #[test]
+    fn decode_damaged_utf8_warns_about_replacement() {
+        let bytes = [b"\xEF\xBB\xBFa,b\n1,".as_slice(), b"\xFF\n"].concat();
+        let warning = decode_to_utf8(&bytes)
+            .expect("should need conversion")
+            .expect("should decode without errors")
+            .warning
+            .expect("replacement should warn");
+        assert!(warning.contains("U+FFFD"), "{warning}");
+    }
+
+    #[test]
+    fn decode_iso_2022_jp_has_no_warning() {
+        let (encoded, _, _) = encoding_rs::ISO_2022_JP.encode("名前,年齢\n田中,30\n");
+        let decoded = decode_to_utf8(&encoded)
+            .expect("should need conversion")
+            .expect("should decode without errors");
+        assert!(decoded.warning.is_none());
+    }
+
+    // --- warnings ---
+
+    #[test]
+    fn empty_sheet_warning_replaces_newlines() {
+        assert_eq!(empty_sheet_warning("A\nB"), "Sheet 'A B' is empty");
+    }
+
+    fn unparsable_datetime() -> calamine::Data {
+        calamine::Data::DateTime(calamine::ExcelDateTime::new(
+            1e10,
+            calamine::ExcelDateTimeType::DateTime,
+            false,
+        ))
+    }
+
+    #[test]
+    fn unparsable_datetime_warning_ignores_valid_cells() {
+        let valid = calamine::Data::DateTime(calamine::ExcelDateTime::new(
+            45000.0,
+            calamine::ExcelDateTimeType::DateTime,
+            false,
+        ));
+        let cells = [valid, calamine::Data::Float(1e10)];
+        assert_eq!(unparsable_datetime_warning(cells.iter()), None);
+    }
+
+    #[test]
+    fn unparsable_datetime_warning_counts_cells() {
+        let cells = [
+            unparsable_datetime(),
+            calamine::Data::Float(1.0),
+            unparsable_datetime(),
+        ];
+        let warning = unparsable_datetime_warning(cells.iter()).expect("should warn");
+        assert!(warning.ends_with(": 2"), "{warning}");
     }
 
     #[test]
@@ -415,12 +505,12 @@ mod tests {
 
     #[test]
     fn cell_to_string_datetime_fallback() {
-        // ExcelDateTime with a value that cannot be converted to NaiveDateTime
-        // Negative serial dates are not valid Excel dates
-        let dt = calamine::ExcelDateTime::new(-1.0, calamine::ExcelDateTimeType::DateTime, false);
+        // A serial date this large is outside the range of NaiveDateTime
+        let dt = calamine::ExcelDateTime::new(1e10, calamine::ExcelDateTimeType::DateTime, false);
+        assert!(dt.as_datetime().is_none());
         let result = cell_to_string(&calamine::Data::DateTime(dt));
         // Should fall back to the raw float value
-        assert!(result.contains("-1"));
+        assert_eq!(result, "10000000000");
     }
 
     #[test]
@@ -438,7 +528,7 @@ mod tests {
         let decoded = decode_to_utf8(bytes)
             .expect("should need conversion")
             .expect("should decode without errors");
-        String::from_utf8(decoded).unwrap()
+        String::from_utf8(decoded.bytes).unwrap()
     }
 
     fn encoded_row(encoding: &'static encoding_rs::Encoding, value: &str) -> Vec<u8> {

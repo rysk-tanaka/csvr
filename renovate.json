@@ -10,6 +10,10 @@
       "matchUpdateTypes": ["minor", "patch"],
       "matchManagers": ["cargo", "pre-commit"],
       "automerge": true
+    },
+    {
+      "matchDepNames": ["gpui", "gpui_platform"],
+      "groupName": "gpui"
     }
   ]
 }

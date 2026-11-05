@@ -62,7 +62,7 @@ src/
 
 ## Rust Edition
 
-Rust 2024 edition（`edition = "2024"`）を使用。GPUI v0.188.6 との互換性は確認済み。
+Rust 2024 edition（`edition = "2024"`）を使用。GPUI v0.233.10 との互換性は確認済み。
 
 ## CI
 

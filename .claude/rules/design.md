@@ -15,7 +15,7 @@ paths:
 - `recompute_filtered_indices()` — `/` フィルタ → `&` 正規表現フィルタ → ソートを一貫適用 + 選択クリア。`set_search_query`、`toggle_sort`、`set_row_filter_query` から呼ばれる
 - `select_cell(filtered_idx, col)` — セル選択。`col=None` で行全体選択
 - `clear_selection()` — 選択解除（Escape で呼ばれる）
-- `move_selection(row_delta, col_delta)` — 矢印キーによるカーソル移動 + `ensure_visible` で自動スクロール。列変更時のみ `recompute_column_stats` を呼ぶ（行のみ移動時はスキップ）
+- `move_selection(row_delta, col_delta, viewport_width)` — 矢印キーによるカーソル移動 + `ensure_visible`（縦）と `ensure_col_visible`（横）で自動スクロール。上下キーでも選択中のセルが見えるように横へ動かす。固定列と行全体の選択では横に動かさない。列変更時のみ `recompute_column_stats` を呼ぶ（行のみ移動時はスキップ）
 - `copy_selection(cx)` — 選択中のセル値（またはタブ区切り行）をクリップボードにコピー（`Cmd+C`）
 - `toggle_chart()` — チャートパネルの表示/非表示切替（`Cmd+G`）
 - `set_chart_type(ct)` — チャートタイプ変更（Bar / Line / Scatter / Histogram）

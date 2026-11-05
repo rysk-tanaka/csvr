@@ -41,6 +41,31 @@ pub(crate) fn clamp_h_offset(offset: f32, content_width: f32, viewport_width: f3
     offset.clamp(-max_scroll, 0.0)
 }
 
+/// Returns the scroll offset that brings a column into the area right of the pinned section,
+/// moving as little as possible. A column wider than the area aligns to its left edge so the
+/// start of the value stays visible.
+pub(crate) fn h_offset_to_reveal(
+    offset: f32,
+    col_start: f32,
+    col_width: f32,
+    visible_width: f32,
+) -> f32 {
+    // The pinned section can fill the window, leaving no area to scroll the column into.
+    if visible_width <= 0.0 {
+        return offset;
+    }
+    let col_left = col_start + offset;
+    if col_left < 0.0 || col_width >= visible_width {
+        return -col_start;
+    }
+    let overflow = col_left + col_width - visible_width;
+    if overflow > 0.0 {
+        offset - overflow
+    } else {
+        offset
+    }
+}
+
 pub(crate) fn filter_rows(rows: &[Rc<Vec<String>>], query: &str) -> Vec<usize> {
     if query.is_empty() {
         return (0..rows.len()).collect();
@@ -510,6 +535,43 @@ mod tests {
     #[test]
     fn clamp_h_offset_stops_at_left_edge() {
         assert_eq!(clamp_h_offset(10.0, 1000.0, 800.0), 0.0);
+    }
+
+    // --- h_offset_to_reveal ---
+
+    #[test]
+    fn h_offset_to_reveal_keeps_offset_when_visible() {
+        assert_eq!(h_offset_to_reveal(0.0, 100.0, 50.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn h_offset_to_reveal_keeps_offset_at_left_edge() {
+        assert_eq!(h_offset_to_reveal(-100.0, 100.0, 50.0, 300.0), -100.0);
+    }
+
+    #[test]
+    fn h_offset_to_reveal_keeps_offset_at_right_edge() {
+        assert_eq!(h_offset_to_reveal(0.0, 250.0, 50.0, 300.0), 0.0);
+    }
+
+    #[test]
+    fn h_offset_to_reveal_scrolls_right_for_overflow() {
+        assert_eq!(h_offset_to_reveal(0.0, 350.0, 50.0, 300.0), -100.0);
+    }
+
+    #[test]
+    fn h_offset_to_reveal_scrolls_left_for_hidden_column() {
+        assert_eq!(h_offset_to_reveal(-200.0, 100.0, 50.0, 300.0), -100.0);
+    }
+
+    #[test]
+    fn h_offset_to_reveal_aligns_wide_column_to_left_edge() {
+        assert_eq!(h_offset_to_reveal(-50.0, 100.0, 400.0, 300.0), -100.0);
+    }
+
+    #[test]
+    fn h_offset_to_reveal_keeps_offset_without_visible_area() {
+        assert_eq!(h_offset_to_reveal(-50.0, 100.0, 50.0, 0.0), -50.0);
     }
 
     // --- compute_column_widths ---

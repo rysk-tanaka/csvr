@@ -12,7 +12,7 @@ use crate::compute::{
     ColumnStats, clamp_h_offset, compute_column_stats, compute_column_widths,
     compute_histogram_bins, compute_numeric_columns, downsample, export_json, export_markdown,
     extract_column_values, extract_scatter_pairs, filter_columns_by_regex, filter_rows,
-    filter_rows_regex, parse_column_filter, row_number_col_width, sort_indices,
+    filter_rows_regex, h_offset_to_reveal, parse_column_filter, row_number_col_width, sort_indices,
 };
 use crate::data::{CHART_TYPES, ChartData, ChartType, CsvData, SortDirection};
 
@@ -229,6 +229,14 @@ impl CsvrApp {
     // Access internal fields directly. Replace when a public API becomes available.
     fn h_scroll_offset(&self) -> gpui::Pixels {
         self.scroll_handle.0.borrow().base_handle.offset().x
+    }
+
+    // HACK: Same as h_scroll_offset. Keep the vertical offset, which scroll_to_item updates
+    // separately during prepaint.
+    fn set_h_scroll_offset(&self, x: gpui::Pixels) {
+        let state = self.scroll_handle.0.borrow();
+        let y = state.base_handle.offset().y;
+        state.base_handle.set_offset(gpui::point(x, y));
     }
 
     pub(crate) fn new(data: CsvData, cx: &mut Context<Self>) -> Self {
@@ -454,7 +462,7 @@ impl CsvrApp {
         self.column_stats_cache = None;
     }
 
-    fn move_selection(&mut self, row_delta: isize, col_delta: isize) {
+    fn move_selection(&mut self, row_delta: isize, col_delta: isize, viewport_width: f32) {
         let row_count = self.filtered_indices.len();
         if row_count == 0 {
             return;
@@ -468,6 +476,7 @@ impl CsvrApp {
                 self.selected_cell = Some((0, initial_col));
                 self.recompute_column_stats();
                 self.ensure_visible(0);
+                self.ensure_col_visible(initial_col, viewport_width);
                 return;
             }
         };
@@ -499,6 +508,7 @@ impl CsvrApp {
             self.recompute_column_stats();
         }
         self.ensure_visible(new_row);
+        self.ensure_col_visible(new_col, viewport_width);
     }
 
     fn ensure_visible(&self, filtered_idx: usize) {
@@ -506,6 +516,31 @@ impl CsvrApp {
             self.scroll_handle
                 .scroll_to_item(filtered_idx, gpui::ScrollStrategy::Center);
         }
+    }
+
+    fn ensure_col_visible(&self, col: Option<usize>, viewport_width: f32) {
+        let Some(col) = col else {
+            return;
+        };
+        let pinned_count = self.pinned_col_count.min(self.visible_col_indices.len());
+        let (pinned, scrollable) = self.visible_col_indices.split_at(pinned_count);
+        // Pinned columns are always on screen.
+        let Some(pos) = scrollable.iter().position(|&c| c == col) else {
+            return;
+        };
+        let total_width = |cols: &[usize]| {
+            cols.iter()
+                .filter_map(|&c| self.col_widths.get(c))
+                .sum::<f32>()
+        };
+        let pinned_width = self.row_num_width + PINNED_BORDER_WIDTH + total_width(pinned);
+        let offset = h_offset_to_reveal(
+            self.h_scroll_offset().as_f32(),
+            total_width(&scrollable[..pos]),
+            self.col_widths.get(col).copied().unwrap_or(0.0),
+            viewport_width - pinned_width,
+        );
+        self.set_h_scroll_offset(px(offset));
     }
 
     fn copy_selection(&self, cx: &mut Context<Self>) {
@@ -750,7 +785,7 @@ impl Render for CsvrApp {
             .on_action(cx.listener(|this, _: &ExportMarkdown, _window, cx| {
                 this.export_markdown(cx);
             }))
-            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _window, cx| {
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
                 let keystroke = &event.keystroke;
 
                 // Arrow key navigation (works when no text input mode is active)
@@ -758,24 +793,25 @@ impl Render for CsvrApp {
                     && !keystroke.modifiers.control
                     && !this.any_input_active()
                 {
+                    let viewport_width = window.viewport_size().width.as_f32();
                     match keystroke.key.as_str() {
                         "up" => {
-                            this.move_selection(-1, 0);
+                            this.move_selection(-1, 0, viewport_width);
                             cx.notify();
                             return;
                         }
                         "down" => {
-                            this.move_selection(1, 0);
+                            this.move_selection(1, 0, viewport_width);
                             cx.notify();
                             return;
                         }
                         "left" => {
-                            this.move_selection(0, -1);
+                            this.move_selection(0, -1, viewport_width);
                             cx.notify();
                             return;
                         }
                         "right" => {
-                            this.move_selection(0, 1);
+                            this.move_selection(0, 1, viewport_width);
                             cx.notify();
                             return;
                         }

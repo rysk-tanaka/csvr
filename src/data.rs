@@ -213,7 +213,7 @@ pub(crate) struct DecodedInput {
 /// Returns `None` if no conversion is needed: valid UTF-8 that is not ISO-2022-JP.
 /// Returns `Some(Ok(decoded))` on successful transcoding. Input that looks like damaged UTF-8
 /// (see `is_damaged_utf8`) has its invalid bytes replaced with U+FFFD. `decoded.warning` is set
-/// for that replacement and whenever non-UTF-8 input is decoded with a guessed encoding.
+/// only for that replacement. A guessed encoding for non-UTF-8 input is printed to stderr instead.
 /// Returns `Some(Err(msg))` if the detected encoding cannot losslessly decode the input.
 pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String>> {
     let is_valid_utf8 = std::str::from_utf8(bytes).is_ok();
@@ -245,16 +245,17 @@ pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String
             actual_encoding.name()
         )));
     }
-    // The guess can be wrong, so make it visible rather than silently showing mojibake.
-    let warning = (!is_valid_utf8).then(|| {
-        format!(
-            "Input is not valid UTF-8; decoded as {}",
+    if !is_valid_utf8 {
+        // The guess can be wrong, so leave a clue on stderr. It stays out of the status bar because
+        // correctly decoded legacy files would otherwise show a warning every time.
+        eprintln!(
+            "Warning: Input is not valid UTF-8; decoded as {}",
             actual_encoding.name()
-        )
-    });
+        );
+    }
     Some(Ok(DecodedInput {
         bytes: decoded.into_owned().into_bytes(),
-        warning,
+        warning: None,
     }))
 }
 
@@ -384,8 +385,7 @@ mod tests {
             .expect("should transcode without errors");
         let decoded = std::str::from_utf8(&result.bytes).unwrap();
         assert!(decoded.contains("名前"));
-        let warning = result.warning.expect("guessed encoding should warn");
-        assert!(warning.contains("Shift_JIS"), "{warning}");
+        assert!(result.warning.is_none());
     }
 
     #[test]

@@ -1368,39 +1368,44 @@ impl Render for CsvrApp {
                 )
             })
             // Body
-            .child(div().flex_1().size_full().child({
-                uniform_list("rows", filtered_count, {
-                    cx.processor(move |this, range: Range<usize>, _, _| {
-                        this.visible_range = range.clone();
-                        range
-                            .filter_map(|i| {
-                                let original_idx = *this.filtered_indices.get(i)?;
-                                let selected_col = this.selected_cell.and_then(|(sel_row, col)| {
-                                    if sel_row == i { Some(col) } else { None }
-                                });
-                                Some(TableRow {
-                                    ix: i,
-                                    row_num: original_idx + 1,
-                                    cells: this.rows.get(original_idx)?.clone(),
-                                    col_widths: this.col_widths.clone(),
-                                    row_num_width: this.row_num_width,
-                                    min_row_width: viewport_width,
-                                    selected_col,
-                                    entity: entity.clone(),
-                                    visible_col_indices: this.visible_col_indices.clone(),
-                                    pinned_col_count: this
-                                        .pinned_col_count
-                                        .min(this.visible_col_indices.len()),
-                                    h_offset: this.h_scroll_offset(),
+            .child(
+                div().flex_1().size_full().child(
+                    uniform_list(
+                        "rows",
+                        filtered_count,
+                        cx.processor(move |this, range: Range<usize>, _, cx| {
+                            this.visible_range = range.clone();
+                            range
+                                .filter_map(|i| {
+                                    let original_idx = *this.filtered_indices.get(i)?;
+                                    let selected_col =
+                                        this.selected_cell.and_then(|(sel_row, col)| {
+                                            if sel_row == i { Some(col) } else { None }
+                                        });
+                                    Some(TableRow {
+                                        ix: i,
+                                        row_num: original_idx + 1,
+                                        cells: this.rows.get(original_idx)?.clone(),
+                                        col_widths: this.col_widths.clone(),
+                                        row_num_width: this.row_num_width,
+                                        min_row_width: viewport_width,
+                                        selected_col,
+                                        entity: cx.entity(),
+                                        visible_col_indices: this.visible_col_indices.clone(),
+                                        pinned_col_count: this
+                                            .pinned_col_count
+                                            .min(this.visible_col_indices.len()),
+                                        h_offset: this.h_scroll_offset(),
+                                    })
                                 })
-                            })
-                            .collect()
-                    })
-                })
-                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
-                .size_full()
-                .track_scroll(&self.scroll_handle)
-            }))
+                                .collect()
+                        }),
+                    )
+                    .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                    .size_full()
+                    .track_scroll(&self.scroll_handle),
+                ),
+            )
             // Status bar
             .child({
                 let stats_text: Option<String> = self.column_stats_cache.as_ref().map(|stats| {

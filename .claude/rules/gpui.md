@@ -88,7 +88,7 @@ impl Focusable for CsvrApp {
 
 ## スクロール実装の注意点
 
-- `uniform_list` の `paint_scroll_listener` は `cx.stop_propagation()` を無条件に呼ぶため、スクロールイベントは親要素に伝播しない
+- `paint_scroll_listener` は `hitbox.should_handle_scroll` で処理の要否を判定し、`cx.stop_propagation()` は呼ばない（v1.27.0 時点）
 - 横スクロールを有効にするには `with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)` を使用
 - `overflow_x_scroll()` / `overflow_scroll()` は `StatefulInteractiveElement` トレイトのメソッド。`div()` で使うには先に `.id("name")` を呼ぶ必要がある
 - `UniformListScrollHandle` の水平オフセットを取得する公開 API は存在しない（v1.27.0 時点）。内部フィールド `handle.0.borrow().base_handle.offset().x` への直接アクセスが必要（`h_scroll_offset()` に分離済み）
@@ -99,4 +99,4 @@ GPUI は公開 API が限られており、内部フィールドへの直接ア�
 
 1. **ヘルパーメソッドに分離** — 内部アクセスを1箇所に閉じ込め、将来の置き換えコストを最小化する
 2. **HACK コメントを付与** — なぜ内部 API が必要か、公開 API が追加されたら置き換える旨を明記する
-3. **GPUI バージョンアップ時に優先確認** — `HACK:` コメントの箇所を最初にチェックする
+3. **リリース前に優先確認** — GPUI の minor / patch 更新は CI が通れば自動マージされるため、csvr のバージョンを上げる前に `HACK:` コメントの箇所を実機で確認する

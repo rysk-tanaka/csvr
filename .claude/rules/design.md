@@ -9,10 +9,11 @@ paths:
 
 `CsvrApp` の状態変更は専用メソッドに集約し、関連する副作用（フィルタ再計算、スクロールリセット等）の呼び忘れを防ぐ。
 
-- `set_search_query()` — クエリ変更 + `filtered_indices` 再計算 + スクロール先頭リセット
+- `set_search_query()` — クエリ変更 + `refilter_keeping_position`
+- `refilter_keeping_position()` — `/` と `&` の入力で再計算し、表示位置と選択を維持する。画面先頭の行以降で最初に残った行を先頭に出す（なければ最後の行）。選択は行が残れば追従し、消えれば解除するだけで、スクロールはしない。GPUI は空のリストのオフセットを 0 に補正するので、0 件になる前の並びと先頭位置を `rows_before_empty` に保持する。`visible_range` は描画でしか更新されないので、次の入力に備えて新しい先頭位置に更新する
 - `toggle_search()` / `close_search()` — 検索バーの表示切替。`close_search` はバーを閉じるがクエリを維持（全コマンド共通の Escape 挙動）
 - `toggle_sort(col)` — ソート状態サイクル（None → Asc → Desc → None）+ `recompute_filtered_indices` + スクロール先頭リセット
-- `recompute_filtered_indices()` — `/` フィルタ → `&` 正規表現フィルタ → ソートを一貫適用 + 選択クリア。`set_search_query`、`toggle_sort`、`set_row_filter_query` から呼ばれる
+- `recompute_filtered_indices()` — `/` フィルタ → `&` 正規表現フィルタ → ソートを一貫適用 + 選択クリア。`refilter_keeping_position`、`toggle_sort` から呼ばれる
 - `select_cell(filtered_idx, col)` — セル選択。`col=None` で行全体選択
 - `clear_selection()` — 選択解除（Escape で呼ばれる）
 - `move_selection(row_delta, col_delta, viewport_width)` — 矢印キーによるカーソル移動 + `ensure_visible`（縦）と `ensure_col_visible`（横）で自動スクロール。上下キーでも選択中のセルが見えるように横へ動かす。固定列と行全体の選択では横に動かさない。列変更時のみ `recompute_column_stats` を呼ぶ（行のみ移動時はスキップ）
@@ -21,10 +22,10 @@ paths:
 - `set_chart_type(ct)` — チャートタイプ変更（Bar / Line / Scatter / Histogram）
 - `set_chart_col(col)` / `set_chart_x_col(col)` — チャート対象列の変更（数値列のみ）+ `recompute_chart_data`
 - `recompute_chart_data()` — `chart_data_cache` を再計算。`toggle_chart`、`set_chart_type`、`set_chart_col`、`set_chart_x_col`、`recompute_filtered_indices` から呼ばれる
-- `recompute_column_stats()` — `column_stats_cache` を再計算。`select_cell` から呼ばれる。`recompute_filtered_indices` ではキャッシュを直接 `None` にクリア
+- `recompute_column_stats()` — `column_stats_cache` を再計算。`select_cell` と、選択が残ったときの `refilter_keeping_position` から呼ばれる。`recompute_filtered_indices` ではキャッシュを直接 `None` にクリア
 - `toggle_col_filter()` / `set_col_filter_query()` / `close_col_filter()` — `*` コマンドによる列フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_visible_columns()` は呼ばない）
 - `toggle_pin_input()` / `confirm_pin_input()` / `cancel_pin_input()` — `f` コマンドによる列固定。空入力で Enter → `pinned_col_count = 0`（リセット）
-- `toggle_row_filter()` / `set_row_filter_query()` / `close_row_filter()` — `&` コマンドによる行の正規表現フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_filtered_indices()` は呼ばない）。`col:pattern` 構文で列指定可能
+- `toggle_row_filter()` / `set_row_filter_query()` / `close_row_filter()` — `&` コマンドによる行の正規表現フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_filtered_indices()` は呼ばない）。`col:pattern` 構文で列指定可能。入力時は `refilter_keeping_position` で表示位置を維持する
 
 ## ステータスバー
 
@@ -32,8 +33,8 @@ paths:
 - **操作の結果は一時メッセージ** — `show_status_message` で `status_message` に設定し、`STATUS_MESSAGE_DURATION` のあとで消す。タイマーの `Task` を保持して置き換えると前のタイマーが止まるので、新しいメッセージは全期間表示される。表示欄は 1 つで、一時メッセージを優先し、消えると警告に戻る
 - **エクスポートはデータがなければクリップボードを書き換えない** — 表示列が空、または表示行が 0 件のときは `No data to export` と表示する。`export_json` などはこの場合も `[]` やヘッダーを返すので、`finish_export` で判定する
 - **メッセージと統計は内容の幅に応じて縮める** — どちらも省略表示にする。ウィンドウが狭くても両方の一部が見える。GPUI は `whitespace_nowrap` でも改行で行を分けるので、1 行に保つためにシート名の改行は空白に置き換える
-- **統計は `column_stats_cache` にキャッシュ** — `chart_data_cache` と同様のパターン。`select_cell` / `recompute_filtered_indices` 時にのみ `recompute_column_stats()` で再計算。`render()` ではキャッシュを参照するだけ（ホバーやリサイズによる再描画で O(n) 計算が走るのを防ぐ）
-- **median/stddev の追加で Vec 蓄積が必要に** — median はソートが必須のため単一パスでは不可能。値を `Vec<f64>` に蓄積し、sum/min/max は蓄積と同時に計算。stddev は標本標準偏差（Bessel 補正: `n-1` 除算）、2パス方式（数値安定性のため）。`count == 1` 時は `0.0`。パフォーマンス影響は `recompute_column_stats` がセル選択変更時のみ呼ばれることで限定
+- **統計は `column_stats_cache` にキャッシュ** — `chart_data_cache` と同様のパターン。`select_cell` と、選択が残ったときの `refilter_keeping_position` でのみ `recompute_column_stats()` で再計算し、`recompute_filtered_indices` ではクリアする。`render()` ではキャッシュを参照するだけ（ホバーやリサイズによる再描画で O(n) 計算が走るのを防ぐ）
+- **median/stddev の追加で Vec 蓄積が必要に** — median はソートが必須のため単一パスでは不可能。値を `Vec<f64>` に蓄積し、sum/min/max は蓄積と同時に計算。stddev は標本標準偏差（Bessel 補正: `n-1` 除算）、2パス方式（数値安定性のため）。`count == 1` 時は `0.0`。パフォーマンス影響は `recompute_column_stats` がセル選択の変更時と、選択が残っている間のフィルタ入力時にだけ呼ばれることで限定
 - **表示フォーマット** — 整数値は小数点なし、それ以外は小数4桁。`format_stat()` ヘルパーで統一。閾値は f64 仮数部の精度限界（2^53 ≈ 9.0e15）
 
 ## メタデータヘッダー検出
@@ -59,7 +60,7 @@ paths:
 
 ## セル選択
 
-- **選択インデックスは `filtered_indices` ベース** — 表示上の位置と一致させることで矢印キー移動が直感的に動作。フィルタ/ソート変更時に `recompute_filtered_indices` で選択をクリアし不整合を防ぐ
+- **選択インデックスは `filtered_indices` ベース** — 表示上の位置と一致させることで矢印キー移動が直感的に動作。ソート変更時は選択をクリアし、フィルタ変更時は元の行を探して位置を合わせ、不整合を防ぐ
 - **行コピーはタブ区切り** — スプレッドシートへの貼り付け互換性が最も高い
 - **`TableRow` に `Entity<CsvrApp>` を保持** — クリックハンドラから親の状態を更新するため。`Entity` は参照カウントされたハンドルなので clone コストは低い
 - **ホバーは GPUI の `.hover()` スタイルで実装** — 状態管理不要。行 div に `.id()` を付与して `StatefulInteractiveElement` にし、`.hover(|style| style.bg(...))` で背景色を変更。選択中の行ではホバーを無効化

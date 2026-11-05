@@ -6,10 +6,11 @@ mod data;
 use std::io::Cursor;
 use std::io::IsTerminal;
 
-use gpui::{App, AppContext, Bounds, KeyBinding, WindowBounds, WindowOptions, px, size};
+use gpui::{App, AppContext, Bounds, KeyBinding, QuitMode, WindowBounds, WindowOptions, px, size};
 
 use crate::app::{
-    CopySelection, CsvrApp, DismissSearch, ExportJson, ExportMarkdown, ToggleChart, ToggleSearch,
+    CopySelection, CsvrApp, DismissSearch, ExportJson, ExportMarkdown, Quit, ToggleChart,
+    ToggleSearch,
 };
 use crate::data::{CsvData, decode_to_utf8};
 
@@ -115,34 +116,41 @@ fn set_dock_icon() {
 
 fn main() {
     let data = load_csv();
-    gpui_platform::application().run(|cx: &mut App| {
-        set_dock_icon();
-        cx.bind_keys([
-            KeyBinding::new("cmd-f", ToggleSearch, Some("CsvrApp")),
-            KeyBinding::new("escape", DismissSearch, Some("CsvrApp")),
-            KeyBinding::new("cmd-g", ToggleChart, Some("CsvrApp")),
-            KeyBinding::new("cmd-c", CopySelection, Some("CsvrApp")),
-            KeyBinding::new("cmd-shift-j", ExportJson, Some("CsvrApp")),
-            KeyBinding::new("cmd-shift-m", ExportMarkdown, Some("CsvrApp")),
-        ]);
-        let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                ..Default::default()
-            },
-            |window, cx| {
-                let entity = cx.new(|cx| CsvrApp::new(data, cx));
-                let focus = entity.read(cx).focus_handle.clone();
-                window.focus(&focus, cx);
-                entity
-            },
-        )
-        .unwrap_or_else(|e| {
-            eprintln!("Error: failed to open window: {}", e);
-            eprintln!("Ensure Xcode and Metal are properly installed.");
-            std::process::exit(1);
+    // macOS defaults to QuitMode::Explicit, which would leave the process running after the
+    // window closes and keep the launching shell from returning.
+    gpui_platform::application()
+        .with_quit_mode(QuitMode::LastWindowClosed)
+        .run(|cx: &mut App| {
+            set_dock_icon();
+            cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+            cx.bind_keys([
+                // No context: quitting must work wherever the focus is.
+                KeyBinding::new("cmd-q", Quit, None),
+                KeyBinding::new("cmd-f", ToggleSearch, Some("CsvrApp")),
+                KeyBinding::new("escape", DismissSearch, Some("CsvrApp")),
+                KeyBinding::new("cmd-g", ToggleChart, Some("CsvrApp")),
+                KeyBinding::new("cmd-c", CopySelection, Some("CsvrApp")),
+                KeyBinding::new("cmd-shift-j", ExportJson, Some("CsvrApp")),
+                KeyBinding::new("cmd-shift-m", ExportMarkdown, Some("CsvrApp")),
+            ]);
+            let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
+            cx.open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let entity = cx.new(|cx| CsvrApp::new(data, cx));
+                    let focus = entity.read(cx).focus_handle.clone();
+                    window.focus(&focus, cx);
+                    entity
+                },
+            )
+            .unwrap_or_else(|e| {
+                eprintln!("Error: failed to open window: {}", e);
+                eprintln!("Ensure Xcode and Metal are properly installed.");
+                std::process::exit(1);
+            });
+            cx.activate(true);
         });
-        cx.activate(true);
-    });
 }

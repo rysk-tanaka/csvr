@@ -23,7 +23,9 @@ impl RenderOnce for MyElement {
 }
 
 // アプリ起動
-gpui_platform::application().run(|cx: &mut App| { ... });
+gpui_platform::application()
+    .with_quit_mode(QuitMode::LastWindowClosed)
+    .run(|cx: &mut App| { ... });
 
 // ウィンドウ作成
 cx.open_window(options, |_window, cx| cx.new(|_| MyView));
@@ -71,6 +73,7 @@ impl Focusable for CsvrApp {
 - `Focusable` トレイトは `gpui::prelude::*` に含まれない。明示的に `use gpui::Focusable` が必要
 - `KeyBinding` のコンテキストは `None` にするとグローバル。将来のモーダル追加時に競合するため `Some("CsvrApp")` を推奨
 - `on_key_down` はアクションにマッチしなかったキーストロークを処理する。テキスト入力は `keystroke.key_char` から取得
+- macOS の `QuitMode` の既定値は `Explicit`。最後のウィンドウを閉じても終了しないため `LastWindowClosed` を指定する
 
 ## バージョン更新時の注意点
 

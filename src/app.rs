@@ -25,7 +25,8 @@ actions!(
         ToggleMetadata,
         CopySelection,
         ExportJson,
-        ExportMarkdown
+        ExportMarkdown,
+        Quit
     ]
 );
 

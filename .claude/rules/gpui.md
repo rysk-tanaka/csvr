@@ -3,7 +3,7 @@ paths:
   - "src/**/*.rs"
 ---
 
-# GPUI API（v0.188.6）
+# GPUI API（v0.233.10）
 
 GPUI のドキュメントは限られている。Zed のソースコード（`~/.cargo/git/checkouts/zed-*/` 以下）が最も信頼できるリファレンス。
 
@@ -23,14 +23,14 @@ impl RenderOnce for MyElement {
 }
 
 // アプリ起動
-Application::new().run(|cx: &mut App| { ... });
+gpui_platform::application().run(|cx: &mut App| { ... });
 
 // ウィンドウ作成
 cx.open_window(options, |_window, cx| cx.new(|_| MyView));
 
 // 仮想スクロールリスト（均一行高）
-uniform_list(entity, "id", item_count, |this, range, window, cx| { ... })
-    .track_scroll(scroll_handle)
+uniform_list("id", item_count, cx.processor(|this, range: Range<usize>, window, cx| { ... }))
+    .track_scroll(&scroll_handle)
 ```
 
 ## キーボード操作・アクション
@@ -61,7 +61,8 @@ impl Focusable for CsvrApp {
 // ウィンドウ作成時にフォーカスを設定
 |window, cx| {
     let entity = cx.new(|cx| CsvrApp::new(data, cx));
-    window.focus(&entity.read(cx).focus_handle.clone());
+    let focus = entity.read(cx).focus_handle.clone();
+    window.focus(&focus, cx);
     entity
 }
 ```
@@ -70,6 +71,12 @@ impl Focusable for CsvrApp {
 - `Focusable` トレイトは `gpui::prelude::*` に含まれない。明示的に `use gpui::Focusable` が必要
 - `KeyBinding` のコンテキストは `None` にするとグローバル。将来のモーダル追加時に競合するため `Some("CsvrApp")` を推奨
 - `on_key_down` はアクションにマッチしなかったキーストロークを処理する。テキスト入力は `keystroke.key_char` から取得
+
+## バージョン更新時の注意点
+
+- `gpui` と `gpui_platform` は同じタグに揃える。タグが異なると `gpui` が2バージョン混在してビルドできない
+- `Pixels` の内部フィールドは非公開。`f32` への変換は `as_f32()` を使う
+- Metal Toolchain がない環境では `--features gpui_platform/runtime_shaders` を付けるとビルド時のシェーダーコンパイルを省略できる
 
 ## 重要な型の対応
 
@@ -84,7 +91,7 @@ impl Focusable for CsvrApp {
 - `uniform_list` の `paint_scroll_listener` は `cx.stop_propagation()` を無条件に呼ぶため、スクロールイベントは親要素に伝播しない
 - 横スクロールを有効にするには `with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)` を使用
 - `overflow_x_scroll()` / `overflow_scroll()` は `StatefulInteractiveElement` トレイトのメソッド。`div()` で使うには先に `.id("name")` を呼ぶ必要がある
-- `UniformListScrollHandle` の水平オフセットを取得する公開 API は存在しない（v0.188.6 時点）。内部フィールド `handle.0.borrow().base_handle.offset().x` への直接アクセスが必要（`h_scroll_offset()` に分離済み）
+- `UniformListScrollHandle` の水平オフセットを取得する公開 API は存在しない（v0.233.10 時点）。内部フィールド `handle.0.borrow().base_handle.offset().x` への直接アクセスが必要（`h_scroll_offset()` に分離済み）
 
 ## 非公開 API の利用ルール
 

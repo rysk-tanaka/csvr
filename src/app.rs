@@ -1369,9 +1369,8 @@ impl Render for CsvrApp {
             })
             // Body
             .child(div().flex_1().size_full().child({
-                let entity_for_rows = entity.clone();
-                uniform_list(entity, "rows", filtered_count, {
-                    move |this, range, _, _| {
+                uniform_list("rows", filtered_count, {
+                    cx.processor(move |this, range: Range<usize>, _, _| {
                         this.visible_range = range.clone();
                         range
                             .filter_map(|i| {
@@ -1387,7 +1386,7 @@ impl Render for CsvrApp {
                                     row_num_width: this.row_num_width,
                                     min_row_width: viewport_width,
                                     selected_col,
-                                    entity: entity_for_rows.clone(),
+                                    entity: entity.clone(),
                                     visible_col_indices: this.visible_col_indices.clone(),
                                     pinned_col_count: this
                                         .pinned_col_count
@@ -1396,11 +1395,11 @@ impl Render for CsvrApp {
                                 })
                             })
                             .collect()
-                    }
+                    })
                 })
                 .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
                 .size_full()
-                .track_scroll(self.scroll_handle.clone())
+                .track_scroll(&self.scroll_handle)
             }))
             // Status bar
             .child({

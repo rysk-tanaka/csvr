@@ -15,10 +15,10 @@ pub(crate) fn draw_chart(
     chart_type: ChartType,
 ) {
     let padding = 16.0;
-    let x0 = bounds.origin.x.0 + padding;
-    let y0 = bounds.origin.y.0 + padding;
-    let w = bounds.size.width.0 - padding * 2.0;
-    let h = bounds.size.height.0 - padding * 2.0;
+    let x0 = bounds.origin.x.as_f32() + padding;
+    let y0 = bounds.origin.y.as_f32() + padding;
+    let w = bounds.size.width.as_f32() - padding * 2.0;
+    let h = bounds.size.height.as_f32() - padding * 2.0;
     if w <= 0.0 || h <= 0.0 {
         return;
     }

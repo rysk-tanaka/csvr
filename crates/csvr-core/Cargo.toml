@@ -1,0 +1,13 @@
+[package]
+name = "csvr-core"
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+[dependencies]
+csv = "1"
+regex.workspace = true
+chardetng = "1.0.0"
+encoding_rs = "0.8.35"
+calamine = { version = "0.38.0", features = ["dates"] }

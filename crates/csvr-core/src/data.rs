@@ -1,12 +1,12 @@
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ChartType {
+pub enum ChartType {
     Bar,
     Line,
     Scatter,
     Histogram,
 }
 
-pub(crate) const CHART_TYPES: [ChartType; 4] = [
+pub const CHART_TYPES: [ChartType; 4] = [
     ChartType::Bar,
     ChartType::Line,
     ChartType::Scatter,
@@ -14,7 +14,7 @@ pub(crate) const CHART_TYPES: [ChartType; 4] = [
 ];
 
 impl ChartType {
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             ChartType::Bar => "Bar",
             ChartType::Line => "Line",
@@ -25,7 +25,7 @@ impl ChartType {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SortDirection {
+pub enum SortDirection {
     Ascending,
     Descending,
 }
@@ -35,7 +35,7 @@ pub(crate) enum SortDirection {
 /// Rows are stored one after another rather than column by column, so a few rows with more fields
 /// than the rest do not add a full column of offsets for every row.
 #[derive(Debug)]
-pub(crate) struct Table {
+pub struct Table {
     /// All cells, row by row, without separators.
     text: String,
     /// Cell `i` is `text[cell_bounds[i]..cell_bounds[i + 1]]`.
@@ -48,7 +48,7 @@ pub(crate) struct Table {
 
 /// One row of a `Table`. A row may have fewer cells than `Table::column_count`.
 #[derive(Clone, Copy)]
-pub(crate) struct Row<'a> {
+pub struct Row<'a> {
     text: &'a str,
     /// The bounds of this row's cells, one more than the number of cells.
     bounds: &'a [usize],
@@ -56,20 +56,26 @@ pub(crate) struct Row<'a> {
 
 impl<'a> Row<'a> {
     /// `None` past the end of the row, like `Vec::get`.
-    pub(crate) fn get(&self, col: usize) -> Option<&'a str> {
+    pub fn get(&self, col: usize) -> Option<&'a str> {
         let start = *self.bounds.get(col)?;
         let end = *self.bounds.get(col + 1)?;
         Some(&self.text[start..end])
     }
 
-    pub(crate) fn iter(&self) -> impl Iterator<Item = &'a str> + Clone + use<'a> {
+    pub fn iter(&self) -> impl Iterator<Item = &'a str> + Clone + use<'a> {
         let text = self.text;
         self.bounds.windows(2).map(move |w| &text[w[0]..w[1]])
     }
 }
 
+impl Default for Table {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Table {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             text: String::new(),
             cell_bounds: vec![0],
@@ -78,7 +84,7 @@ impl Table {
         }
     }
 
-    pub(crate) fn row_count(&self) -> usize {
+    pub fn row_count(&self) -> usize {
         self.row_starts.len() - 1
     }
 
@@ -86,7 +92,7 @@ impl Table {
         self.column_count
     }
 
-    pub(crate) fn row(&self, row: usize) -> Option<Row<'_>> {
+    pub fn row(&self, row: usize) -> Option<Row<'_>> {
         let first = *self.row_starts.get(row)?;
         let last = *self.row_starts.get(row + 1)?;
         Some(Row {
@@ -191,17 +197,17 @@ impl Table {
     }
 }
 
-pub(crate) struct CsvData {
-    pub(crate) headers: Vec<String>,
-    pub(crate) rows: Table,
+pub struct CsvData {
+    pub headers: Vec<String>,
+    pub rows: Table,
     /// Original header row + rows before the promoted header (metadata section in files with mixed formats)
-    pub(crate) metadata: Vec<Vec<String>>,
+    pub metadata: Vec<Vec<String>>,
     /// Problems found while loading the input, shown in the status bar and on stderr
-    pub(crate) warnings: Vec<String>,
+    pub warnings: Vec<String>,
 }
 
 impl CsvData {
-    pub(crate) fn from_reader<R: std::io::Read>(reader: R) -> Result<Self, csv::Error> {
+    pub fn from_reader<R: std::io::Read>(reader: R) -> Result<Self, csv::Error> {
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(true)
             .flexible(true)
@@ -287,7 +293,7 @@ fn find_dominant_field_count(
 }
 
 #[derive(Clone)]
-pub(crate) enum ChartData {
+pub enum ChartData {
     Points(Vec<f64>),
     Bins(Vec<usize>),
     Pairs(Vec<(f64, f64)>),
@@ -295,18 +301,18 @@ pub(crate) enum ChartData {
 
 /// One axis of a chart: the value range the plot maps to and the labels to draw.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ChartAxis {
-    pub(crate) lo: f64,
-    pub(crate) hi: f64,
+pub struct ChartAxis {
+    pub lo: f64,
+    pub hi: f64,
     /// Position from `lo` (0.0) to `hi` (1.0), and the label to draw there.
-    pub(crate) ticks: Vec<(f32, String)>,
+    pub ticks: Vec<(f32, String)>,
 }
 
 /// `x` is `None` when the horizontal axis is not a value (bar and line charts).
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ChartAxes {
-    pub(crate) y: ChartAxis,
-    pub(crate) x: Option<ChartAxis>,
+pub struct ChartAxes {
+    pub y: ChartAxis,
+    pub x: Option<ChartAxis>,
 }
 
 fn cell_to_string(cell: &calamine::Data) -> String {
@@ -350,7 +356,7 @@ fn unparsable_datetime_warning<'a>(
 }
 
 impl CsvData {
-    pub(crate) fn from_xlsx<P: AsRef<std::path::Path>>(path: P) -> Result<Self, String> {
+    pub fn from_xlsx<P: AsRef<std::path::Path>>(path: P) -> Result<Self, String> {
         use calamine::{Reader, open_workbook_auto};
         let mut workbook =
             open_workbook_auto(&path).map_err(|e| format!("failed to open workbook: {}", e))?;
@@ -389,9 +395,9 @@ impl CsvData {
 }
 
 #[derive(Debug)]
-pub(crate) struct DecodedInput {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) warning: Option<String>,
+pub struct DecodedInput {
+    pub bytes: Vec<u8>,
+    pub warning: Option<String>,
 }
 
 /// Detect encoding and decode bytes to UTF-8.
@@ -400,7 +406,7 @@ pub(crate) struct DecodedInput {
 /// (see `is_damaged_utf8`) has its invalid bytes replaced with U+FFFD. `decoded.warning` is set
 /// only for that replacement. A guessed encoding for non-UTF-8 input is printed to stderr instead.
 /// Returns `Some(Err(msg))` if the detected encoding cannot losslessly decode the input.
-pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String>> {
+pub fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String>> {
     let is_valid_utf8 = std::str::from_utf8(bytes).is_ok();
     // ISO-2022-JP is 7-bit with escape sequences, so it also passes UTF-8 validation.
     let may_be_iso_2022_jp = bytes.is_ascii() && bytes.contains(&0x1B);

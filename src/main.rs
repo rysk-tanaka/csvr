@@ -1,18 +1,17 @@
 mod app;
 mod chart;
-mod compute;
-mod data;
 
 use std::io::Cursor;
 use std::io::IsTerminal;
 
 use gpui::{App, AppContext, Bounds, KeyBinding, QuitMode, WindowBounds, WindowOptions, px, size};
 
+use csvr_core::data::{CsvData, decode_to_utf8};
+
 use crate::app::{
     CopySelection, CsvrApp, DismissSearch, ExportJson, ExportMarkdown, Quit, ToggleChart,
     ToggleSearch,
 };
-use crate::data::{CsvData, decode_to_utf8};
 
 fn print_usage_and_exit(msg: &str) -> ! {
     eprintln!("Error: {}", msg);

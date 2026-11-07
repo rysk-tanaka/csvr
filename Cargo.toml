@@ -1,3 +1,10 @@
+[workspace]
+members = ["crates/csvr-core"]
+resolver = "3"
+
+[workspace.dependencies]
+regex = "1.12.3"
+
 [package]
 name = "csvr"
 version = "0.3.0"
@@ -5,14 +12,11 @@ edition = "2024"
 license = "MIT"
 
 [dependencies]
+csvr-core = { path = "crates/csvr-core" }
 gpui = { git = "https://github.com/zed-industries/zed.git", tag = "v1.27.0" }
 gpui_platform = { git = "https://github.com/zed-industries/zed.git", tag = "v1.27.0", features = ["font-kit"] }
-csv = "1"
 futures-lite = "2.6.1"
-regex = "1.12.3"
-chardetng = "1.0.0"
-encoding_rs = "0.8.35"
-calamine = { version = "0.38.0", features = ["dates"] }
+regex.workspace = true
 objc = "0.2"
 
 [lints.rust]

@@ -3,7 +3,7 @@ use gpui::{
     Window, fill, point, px, rems, rgb, size,
 };
 
-use crate::data::{ChartAxes, ChartData, ChartType};
+use csvr_core::data::{ChartAxes, ChartData, ChartType};
 
 pub(crate) const CHART_BLUE: u32 = 0x89b4fa;
 pub(crate) const CHART_GREEN: u32 = 0xa6e3a1;

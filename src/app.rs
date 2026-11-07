@@ -12,8 +12,8 @@ use gpui::{
 use regex::RegexBuilder;
 
 use csvr_core::compute::{
-    ColumnStats, MAX_COL_WIDTH, RowFilter, RowPositions, TextInputState, anchored_position,
-    caret_scroll_offset, chart_legend, clamp_h_offset, compute_column_stats, compute_column_widths,
+    ColumnStats, RowFilter, RowPositions, TextInputState, anchored_position, caret_scroll_offset,
+    chart_legend, clamp_h_offset, compute_column_stats, compute_column_widths,
     compute_histogram_bins, compute_numeric_columns, copied_status_message, downsample,
     export_json, export_markdown, extract_column_values, extract_scatter_pairs,
     filter_columns_by_regex, h_offset_to_reveal, histogram_axes, measurable_by_pairs,
@@ -1254,7 +1254,7 @@ impl EntityInputHandler for CsvrApp {
 }
 
 /// The widths of the columns and of the row number column, measured with the fonts the table
-/// draws with. Cell lines go through `LineMeasure`; headers are few, so each is shaped whole.
+/// draws with.
 fn measure_columns(window: &Window, rows: &Table, headers: &[SharedString]) -> (Vec<f32>, f32) {
     let rem_size = window.rem_size();
     let cell_size = CELL_TEXT_SIZE.to_pixels(rem_size);
@@ -1263,18 +1263,22 @@ fn measure_columns(window: &Window, rows: &Table, headers: &[SharedString]) -> (
         ..gpui::font(TABLE_FONT_FAMILY)
     };
     let header_size = HEADER_TEXT_SIZE.to_pixels(rem_size);
+    // Headers are few, so each is shaped whole.
+    let header_measure = LineMeasure::new(window, header_font, header_size);
     // Always counted, so sorting a column does not change its width and shift the table.
     let indicator_width = SORT_INDICATOR_GAP.to_pixels(rem_size).as_f32()
         + ["↑", "↓"]
-            .map(|arrow| line_width(window, &header_font, header_size, arrow))
+            .map(|arrow| header_measure.shaped_width(arrow))
             .into_iter()
             .fold(0.0, f32::max);
     let mut cell_measure = LineMeasure::new(window, gpui::font(TABLE_FONT_FAMILY), cell_size);
     let col_widths = compute_column_widths(
         rows,
         headers,
-        |line| cell_measure.width(line),
-        |line| line_width(window, &header_font, header_size, line) + indicator_width,
+        |line, limit| cell_measure.width(line, limit),
+        |line, limit| {
+            header_measure.shaped_line_width(line, limit - indicator_width) + indicator_width
+        },
     );
     let digit_width = ('0'..='9')
         .map(|digit| cell_measure.char_width(digit))
@@ -1308,16 +1312,16 @@ impl<'a> LineMeasure<'a> {
         }
     }
 
-    /// The width of `line`, or at least `MAX_COL_WIDTH` when it is wider: past that the column
-    /// is as wide as it gets, so the rest is not measured.
-    fn width(&mut self, line: &str) -> f32 {
+    /// The width of `line`, or a width at or above `limit` when the line is that wide: past
+    /// `limit` the column is as wide as it gets, so the rest is not measured.
+    fn width(&mut self, line: &str, limit: f32) -> f32 {
         if !measurable_by_pairs(line) {
-            return self.shaped_line_width(line);
+            return self.shaped_line_width(line, limit);
         }
         let mut width = 0.0;
         let mut previous = None;
         for c in line.chars() {
-            if width >= MAX_COL_WIDTH {
+            if width >= limit {
                 break;
             }
             width += self.char_width(c);
@@ -1345,16 +1349,20 @@ impl<'a> LineMeasure<'a> {
         if let Some(&adjustment) = self.pair_adjustments.get(&(a, b)) {
             return adjustment;
         }
-        let pair: String = [a, b].into_iter().collect();
-        let adjustment = self.shaped_width(&pair) - self.char_width(a) - self.char_width(b);
+        let mut buffer = [0; 8];
+        let a_len = a.encode_utf8(&mut buffer).len();
+        let b_len = b.encode_utf8(&mut buffer[a_len..]).len();
+        let pair = std::str::from_utf8(&buffer[..a_len + b_len]).expect("encoded chars are UTF-8");
+        let adjustment = self.shaped_width(pair) - self.char_width(a) - self.char_width(b);
         self.pair_adjustments.insert((a, b), adjustment);
         adjustment
     }
 
-    fn shaped_line_width(&self, line: &str) -> f32 {
+    /// Like `width`, but shapes the line whole.
+    fn shaped_line_width(&self, line: &str, limit: f32) -> f32 {
         if let Some((prefix_end, _)) = line.char_indices().nth(SHAPED_PREFIX_CHARS) {
             let prefix_width = self.shaped_width(&line[..prefix_end]);
-            if prefix_width >= MAX_COL_WIDTH {
+            if prefix_width >= limit {
                 return prefix_width;
             }
         }

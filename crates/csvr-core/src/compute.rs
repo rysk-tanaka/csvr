@@ -6,20 +6,25 @@ use regex::{Regex, RegexBuilder};
 use crate::data::{ChartAxes, ChartAxis, ChartType, Row, SortDirection, Table};
 
 pub(crate) const MIN_COL_WIDTH: f32 = 50.0;
-pub const MAX_COL_WIDTH: f32 = 400.0;
+pub(crate) const MAX_COL_WIDTH: f32 = 400.0;
 pub(crate) const COL_PADDING: f32 = 24.0;
 pub(crate) const ROW_NUM_WIDTH: f32 = 16.0;
 /// Rows the column widths look at. Shaping every cell of a large file would hold up opening it.
 const WIDTH_SAMPLE_ROWS: usize = 100;
+/// A line at least this wide makes its column `MAX_COL_WIDTH` wide.
+const WIDEST_MEASURED_LINE: f32 = MAX_COL_WIDTH - COL_PADDING;
 
 /// Column widths from the widest line of each header and of its first rows. The app measures
 /// each line with the font it draws with: `cell_width` for cells and `header_width` for headers,
-/// the latter including the sort indicator.
+/// the latter including the sort indicator. Both get a limit as well: a line at least that wide
+/// makes the column as wide as it gets, so they may stop measuring there and return any width
+/// at or above it. Long values are common in the first rows (JSON, Base64, prose), and the
+/// column only shows the start of them.
 pub fn compute_column_widths(
     rows: &Table,
     headers: &[impl AsRef<str>],
-    mut cell_width: impl FnMut(&str) -> f32,
-    mut header_width: impl FnMut(&str) -> f32,
+    mut cell_width: impl FnMut(&str, f32) -> f32,
+    mut header_width: impl FnMut(&str, f32) -> f32,
 ) -> Vec<f32> {
     let sample_count = rows.row_count().min(WIDTH_SAMPLE_ROWS);
     // Category columns repeat the same values, and shaping is the slow part. The keys borrow
@@ -30,12 +35,16 @@ pub fn compute_column_widths(
         .enumerate()
         .map(|(col_idx, header)| {
             let header_widest = lines(header.as_ref())
-                .map(&mut header_width)
+                .map(|line| header_width(line, WIDEST_MEASURED_LINE))
                 .fold(0.0, f32::max);
             let cell_widest = (0..sample_count)
                 .filter_map(|r| rows.cell(r, col_idx))
                 .flat_map(lines)
-                .map(|line| *measured.entry(line).or_insert_with(|| cell_width(line)))
+                .map(|line| {
+                    *measured
+                        .entry(line)
+                        .or_insert_with(|| cell_width(line, WIDEST_MEASURED_LINE))
+                })
                 .fold(0.0, f32::max);
             (header_widest.max(cell_widest) + COL_PADDING).clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
         })
@@ -52,11 +61,10 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
 /// Whether the app may measure a line from its characters and adjacent pairs instead of shaping
 /// it whole (see `LineMeasure` in the app). Only characters that shaping does not join with
 /// their neighbors qualify: Latin, symbols, kanji, kana, and fullwidth and halfwidth forms of
-/// letters. A line with any
-/// other character is shaped whole, because the result is not decided by pairs: a VS16 such as
-/// ©️ draws the character before as an emoji (about twice as wide), a ZWJ sequence draws as one
-/// emoji, combining marks draw on the letter before, and scripts such as Arabic change shape by
-/// context. CJK punctuation (、。「」（）) is shaped whole too: CoreText spaces it by what
+/// letters. A line with any other character is shaped whole, because the result is not decided
+/// by pairs: a VS16 such as ©️ draws the character before as an emoji (about twice as wide), a
+/// ZWJ sequence draws as one emoji, combining marks draw on the letter before, and scripts such
+/// as Arabic change shape by context. CJK punctuation (、。「」（）) is shaped whole too: CoreText spaces it by what
 /// surrounds it, so a pair measured alone can differ from the same pair in a line (by 28px over
 /// one line of Japanese prose), and measuring every pair with it is slower than shaping the
 /// lines whole. So is Hangul: next to kanji and kana it changed the width of the line by up to
@@ -1088,12 +1096,34 @@ mod tests {
     /// Stands in for the font: every character is as wide as a halfwidth one at `text_sm`.
     const FAKE_CHAR_WIDTH: f32 = 7.5;
 
-    fn fake_width(text: &str) -> f32 {
+    fn fake_width(text: &str, _limit: f32) -> f32 {
         text.chars().count() as f32 * FAKE_CHAR_WIDTH
     }
 
     fn widths_of(data: &CsvData) -> Vec<f32> {
         compute_column_widths(&data.rows, &data.headers, fake_width, fake_width)
+    }
+
+    #[test]
+    fn column_widths_let_measuring_stop_at_widest_line() {
+        let data = make_csv_data(&["a"], &[&["b"]]);
+        let mut cell_limits = Vec::new();
+        let mut header_limits = Vec::new();
+        let widths = compute_column_widths(
+            &data.rows,
+            &data.headers,
+            |_, limit| {
+                cell_limits.push(limit);
+                limit
+            },
+            |_, limit| {
+                header_limits.push(limit);
+                0.0
+            },
+        );
+        assert_eq!(cell_limits, [WIDEST_MEASURED_LINE]);
+        assert_eq!(header_limits, [WIDEST_MEASURED_LINE]);
+        assert!((widths[0] - MAX_COL_WIDTH).abs() < 0.01);
     }
 
     #[test]
@@ -1138,8 +1168,8 @@ mod tests {
     fn column_widths_use_header_measure_for_headers() {
         // The app's header measure adds the sort indicator; cells must not get it.
         let data = make_csv_data(&["ab"], &[&["abcd"]]);
-        let widths = compute_column_widths(&data.rows, &data.headers, fake_width, |h| {
-            fake_width(h) + 50.0
+        let widths = compute_column_widths(&data.rows, &data.headers, fake_width, |h, limit| {
+            fake_width(h, limit) + 50.0
         });
         assert!((widths[0] - (2.0 * FAKE_CHAR_WIDTH + 50.0 + COL_PADDING)).abs() < 0.01);
     }
@@ -1200,9 +1230,9 @@ mod tests {
         compute_column_widths(
             &data.rows,
             &data.headers,
-            |line| {
+            |line, limit| {
                 measured.push(line.to_string());
-                fake_width(line)
+                fake_width(line, limit)
             },
             fake_width,
         );
@@ -1221,9 +1251,9 @@ mod tests {
         let widths = compute_column_widths(
             &data.rows,
             &data.headers,
-            |line| {
+            |line, limit| {
                 measured.push(line.to_string());
-                fake_width(line)
+                fake_width(line, limit)
             },
             fake_width,
         );

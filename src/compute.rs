@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
-use std::rc::Rc;
+use std::ops::Range;
+use std::sync::Arc;
 
-use regex::RegexBuilder;
+use regex::{Regex, RegexBuilder};
 
 use crate::data::{ChartAxes, ChartAxis, ChartType, CsvData, SortDirection};
 
@@ -84,19 +85,63 @@ pub(crate) fn anchored_position(old: &[usize], new: &[usize], top: usize) -> Opt
         .or_else(|| new.len().checked_sub(1))
 }
 
-pub(crate) fn filter_rows(rows: &[Rc<Vec<String>>], query: &str) -> Vec<usize> {
-    if query.is_empty() {
-        return (0..rows.len()).collect();
+/// The `/` search and the `&` regex filter, prepared once per query so that the rows can be
+/// checked in chunks off the UI thread.
+pub(crate) struct RowFilter {
+    /// Lowercased `/` query; `None` when the query is empty.
+    query_lower: Option<String>,
+    /// Compiled `&` pattern and its target column; `None` when the pattern is empty or invalid.
+    regex: Option<(Regex, Option<usize>)>,
+}
+
+impl RowFilter {
+    /// Returns the filter and whether `pattern` is an invalid regex. An invalid pattern is
+    /// ignored so that the `/` search still narrows the rows.
+    pub(crate) fn new(query: &str, pattern: &str, target_col: Option<usize>) -> (Self, bool) {
+        let query_lower = (!query.is_empty()).then(|| query.to_lowercase());
+        if pattern.is_empty() {
+            return (
+                Self {
+                    query_lower,
+                    regex: None,
+                },
+                false,
+            );
+        }
+        let compiled = RegexBuilder::new(pattern).case_insensitive(true).build();
+        let has_error = compiled.is_err();
+        let regex = compiled.ok().map(|re| (re, target_col));
+        (Self { query_lower, regex }, has_error)
     }
-    let query_lower = query.to_lowercase();
-    rows.iter()
-        .enumerate()
-        .filter(|(_, row)| {
+
+    /// The two conditions are checked separately, so they may hold in different cells.
+    pub(crate) fn matches(&self, row: &[String]) -> bool {
+        let matches_query = self.query_lower.as_ref().is_none_or(|query| {
             row.iter()
-                .any(|cell| cell.to_lowercase().contains(&query_lower))
-        })
-        .map(|(i, _)| i)
-        .collect()
+                .any(|cell| cell.to_lowercase().contains(query.as_str()))
+        });
+        if !matches_query {
+            return false;
+        }
+        match &self.regex {
+            None => true,
+            Some((re, Some(col))) => row.get(*col).is_some_and(|cell| re.is_match(cell)),
+            Some((re, None)) => row.iter().any(|cell| re.is_match(cell)),
+        }
+    }
+
+    /// Append the indices in `range` whose rows match. Called chunk by chunk so that a task can
+    /// yield between chunks.
+    pub(crate) fn filter_range(
+        &self,
+        rows: &[Arc<Vec<String>>],
+        range: Range<usize>,
+        out: &mut Vec<usize>,
+    ) {
+        let end = range.end.min(rows.len());
+        let start = range.start.min(end);
+        out.extend((start..end).filter(|&i| self.matches(&rows[i])));
+    }
 }
 
 /// Determine which columns are numeric based on all rows.
@@ -121,7 +166,7 @@ pub(crate) fn compute_numeric_columns(rows: &[Vec<String>], col_count: usize) ->
 }
 
 pub(crate) fn sort_indices(
-    rows: &[Rc<Vec<String>>],
+    rows: &[Arc<Vec<String>>],
     indices: &[usize],
     col: usize,
     use_numeric: bool,
@@ -159,7 +204,7 @@ pub(crate) fn sort_indices(
 /// Extract finite numeric values from a specific column for the given row indices.
 /// Non-numeric, NaN, Infinity, and missing values are skipped.
 pub(crate) fn extract_column_values(
-    rows: &[Rc<Vec<String>>],
+    rows: &[Arc<Vec<String>>],
     indices: &[usize],
     col: usize,
 ) -> Vec<(usize, f64)> {
@@ -201,7 +246,7 @@ pub(crate) fn downsample<T: Copy>(values: &[T], max: usize) -> Vec<T> {
 /// Extract paired finite numeric values from two columns for the given row indices.
 /// Only rows where both columns have a valid finite number are included.
 pub(crate) fn extract_scatter_pairs(
-    rows: &[Rc<Vec<String>>],
+    rows: &[Arc<Vec<String>>],
     indices: &[usize],
     x_col: usize,
     y_col: usize,
@@ -241,7 +286,7 @@ pub(crate) struct ColumnStats {
 /// Collects values into a Vec for median (requires sorting) and stddev (two-pass).
 /// Returns `None` if no finite numeric values exist.
 pub(crate) fn compute_column_stats(
-    rows: &[Rc<Vec<String>>],
+    rows: &[Arc<Vec<String>>],
     indices: &[usize],
     col: usize,
 ) -> Option<ColumnStats> {
@@ -330,31 +375,6 @@ pub(crate) fn parse_column_filter(query: &str, headers: &[String]) -> (Option<us
         return (Some(idx), suffix.to_string());
     }
     (None, query.to_string())
-}
-
-/// Filter rows by regex, optionally targeting a specific column.
-/// Applies to the given subset of row indices.
-pub(crate) fn filter_rows_regex(
-    rows: &[Rc<Vec<String>>],
-    indices: &[usize],
-    pattern: &str,
-    target_col: Option<usize>,
-) -> Result<Vec<usize>, regex::Error> {
-    if pattern.is_empty() {
-        return Ok(indices.to_vec());
-    }
-    let re = RegexBuilder::new(pattern).case_insensitive(true).build()?;
-    Ok(indices
-        .iter()
-        .copied()
-        .filter(|&i| {
-            let Some(row) = rows.get(i) else { return false };
-            match target_col {
-                Some(col) => row.get(col).is_some_and(|cell| re.is_match(cell)),
-                None => row.iter().any(|cell| re.is_match(cell)),
-            }
-        })
-        .collect())
 }
 
 /// Compute histogram bin counts for the given values.
@@ -548,7 +568,7 @@ pub(crate) fn copied_status_message(format_name: &str, row_count: usize) -> Stri
 /// Export visible data as JSON (array of objects).
 pub(crate) fn export_json(
     headers: &[String],
-    rows: &[Rc<Vec<String>>],
+    rows: &[Arc<Vec<String>>],
     filtered_indices: &[usize],
     visible_col_indices: &[usize],
 ) -> String {
@@ -594,7 +614,7 @@ fn escape_markdown_cell(s: &str) -> String {
 /// Export visible data as GitHub-flavored Markdown table.
 pub(crate) fn export_markdown(
     headers: &[String],
-    rows: &[Rc<Vec<String>>],
+    rows: &[Arc<Vec<String>>],
     filtered_indices: &[usize],
     visible_col_indices: &[usize],
 ) -> String {
@@ -647,9 +667,9 @@ mod tests {
         }
     }
 
-    fn make_rc_rows(rows: &[&[&str]]) -> Vec<Rc<Vec<String>>> {
+    fn make_rows(rows: &[&[&str]]) -> Vec<Arc<Vec<String>>> {
         rows.iter()
-            .map(|row| Rc::new(row.iter().map(|s| s.to_string()).collect()))
+            .map(|row| Arc::new(row.iter().map(|s| s.to_string()).collect()))
             .collect()
     }
 
@@ -802,50 +822,125 @@ mod tests {
         assert!((w - 68.5).abs() < 0.01);
     }
 
-    // --- filter_rows ---
+    // --- RowFilter: `/` search ---
+
+    /// Filter all rows in one call, returning the matching indices and the regex error flag.
+    fn filter_all(
+        rows: &[Arc<Vec<String>>],
+        query: &str,
+        pattern: &str,
+        target_col: Option<usize>,
+    ) -> (Vec<usize>, bool) {
+        let (filter, has_error) = RowFilter::new(query, pattern, target_col);
+        let mut out = Vec::new();
+        filter.filter_range(rows, 0..rows.len(), &mut out);
+        (out, has_error)
+    }
+
+    fn search(rows: &[Arc<Vec<String>>], query: &str) -> Vec<usize> {
+        filter_all(rows, query, "", None).0
+    }
 
     #[test]
     fn filter_empty_query_returns_all() {
-        let rows = make_rc_rows(&[&["Alice", "30"], &["Bob", "25"]]);
-        assert_eq!(filter_rows(&rows, ""), vec![0, 1]);
+        let rows = make_rows(&[&["Alice", "30"], &["Bob", "25"]]);
+        assert_eq!(search(&rows, ""), vec![0, 1]);
     }
 
     #[test]
     fn filter_matches_substring() {
-        let rows = make_rc_rows(&[&["Alice", "Tokyo"], &["Bob", "Osaka"], &["Carol", "Tokyo"]]);
-        assert_eq!(filter_rows(&rows, "tokyo"), vec![0, 2]);
+        let rows = make_rows(&[&["Alice", "Tokyo"], &["Bob", "Osaka"], &["Carol", "Tokyo"]]);
+        assert_eq!(search(&rows, "tokyo"), vec![0, 2]);
     }
 
     #[test]
     fn filter_case_insensitive() {
-        let rows = make_rc_rows(&[&["ALICE"], &["alice"], &["Alice"]]);
-        assert_eq!(filter_rows(&rows, "alice"), vec![0, 1, 2]);
+        let rows = make_rows(&[&["ALICE"], &["alice"], &["Alice"]]);
+        assert_eq!(search(&rows, "alice"), vec![0, 1, 2]);
     }
 
     #[test]
     fn filter_no_matches() {
-        let rows = make_rc_rows(&[&["Alice"], &["Bob"]]);
-        let result = filter_rows(&rows, "xyz");
-        assert!(result.is_empty());
+        let rows = make_rows(&[&["Alice"], &["Bob"]]);
+        assert!(search(&rows, "xyz").is_empty());
     }
 
     #[test]
     fn filter_matches_any_column() {
-        let rows = make_rc_rows(&[&["Alice", "30", "Tokyo"], &["Bob", "25", "Osaka"]]);
-        assert_eq!(filter_rows(&rows, "25"), vec![1]);
+        let rows = make_rows(&[&["Alice", "30", "Tokyo"], &["Bob", "25", "Osaka"]]);
+        assert_eq!(search(&rows, "25"), vec![1]);
     }
 
     #[test]
     fn filter_empty_rows() {
-        let rows: Vec<Rc<Vec<String>>> = vec![];
-        assert!(filter_rows(&rows, "test").is_empty());
+        let rows: Vec<Arc<Vec<String>>> = vec![];
+        assert!(search(&rows, "test").is_empty());
+    }
+
+    // --- RowFilter: `/` and `&` together, and chunking ---
+
+    #[test]
+    fn row_filter_combines_search_and_regex() {
+        let rows = make_rows(&[&["Alice", "Tokyo"], &["Alice", "Osaka"], &["Bob", "Tokyo"]]);
+        assert_eq!(filter_all(&rows, "alice", "tokyo", None), (vec![0], false));
+    }
+
+    #[test]
+    fn row_filter_conditions_may_hold_in_different_cells() {
+        let rows = make_rows(&[&["Alice", "Tokyo"]]);
+        assert_eq!(filter_all(&rows, "Alice", "Tokyo", None), (vec![0], false));
+    }
+
+    #[test]
+    fn row_filter_target_col_applies_to_regex_only() {
+        // "alice" is found in column 0 even though the regex targets column 1.
+        let rows = make_rows(&[&["Alice", "Tokyo"], &["Tokyo", "Alice"]]);
+        assert_eq!(
+            filter_all(&rows, "alice", "tokyo", Some(1)),
+            (vec![0], false)
+        );
+    }
+
+    #[test]
+    fn row_filter_invalid_regex_keeps_search() {
+        let rows = make_rows(&[&["Alice"], &["Bob"]]);
+        assert_eq!(filter_all(&rows, "bob", "[bad", None), (vec![1], true));
+    }
+
+    #[test]
+    fn row_filter_range_matches_whole_scan() {
+        let rows = make_rows(&[
+            &["a1"],
+            &["b2"],
+            &["a3"],
+            &["a4"],
+            &["b5"],
+            &["a6"],
+            &["a7"],
+        ]);
+        let (filter, _) = RowFilter::new("a", "", None);
+        let mut chunked = Vec::new();
+        for start in (0..rows.len()).step_by(3) {
+            filter.filter_range(&rows, start..start + 3, &mut chunked);
+        }
+        assert_eq!(chunked, search(&rows, "a"));
+    }
+
+    #[test]
+    fn row_filter_range_beyond_rows_is_clamped() {
+        let rows = make_rows(&[&["a"], &["a"]]);
+        let (filter, _) = RowFilter::new("a", "", None);
+        let mut out = Vec::new();
+        filter.filter_range(&rows, 1..10, &mut out);
+        filter.filter_range(&rows, 5..10, &mut out);
+        assert_eq!(out, vec![1]);
     }
 
     // --- sort_indices ---
 
     #[test]
     fn sort_string_ascending() {
-        let rows = make_rc_rows(&[&["Charlie"], &["Alice"], &["Bob"]]);
+        let rows = make_rows(&[&["Charlie"], &["Alice"], &["Bob"]]);
         let indices = vec![0, 1, 2];
         let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
         assert_eq!(result, vec![1, 2, 0]);
@@ -853,7 +948,7 @@ mod tests {
 
     #[test]
     fn sort_string_descending() {
-        let rows = make_rc_rows(&[&["Charlie"], &["Alice"], &["Bob"]]);
+        let rows = make_rows(&[&["Charlie"], &["Alice"], &["Bob"]]);
         let indices = vec![0, 1, 2];
         let result = sort_indices(&rows, &indices, 0, false, SortDirection::Descending);
         assert_eq!(result, vec![0, 2, 1]);
@@ -861,7 +956,7 @@ mod tests {
 
     #[test]
     fn sort_numeric_ascending() {
-        let rows = make_rc_rows(&[&["100"], &["3"], &["25"]]);
+        let rows = make_rows(&[&["100"], &["3"], &["25"]]);
         let indices = vec![0, 1, 2];
         let result = sort_indices(&rows, &indices, 0, true, SortDirection::Ascending);
         assert_eq!(result, vec![1, 2, 0]);
@@ -869,7 +964,7 @@ mod tests {
 
     #[test]
     fn sort_numeric_descending() {
-        let rows = make_rc_rows(&[&["100"], &["3"], &["25"]]);
+        let rows = make_rows(&[&["100"], &["3"], &["25"]]);
         let indices = vec![0, 1, 2];
         let result = sort_indices(&rows, &indices, 0, true, SortDirection::Descending);
         assert_eq!(result, vec![0, 2, 1]);
@@ -877,7 +972,7 @@ mod tests {
 
     #[test]
     fn sort_respects_filtered_indices() {
-        let rows = make_rc_rows(&[&["C"], &["A"], &["B"], &["D"]]);
+        let rows = make_rows(&[&["C"], &["A"], &["B"], &["D"]]);
         let indices = vec![0, 2, 3];
         let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
         assert_eq!(result, vec![2, 0, 3]);
@@ -885,7 +980,7 @@ mod tests {
 
     #[test]
     fn sort_mixed_numeric_and_string_uses_string_comparison() {
-        let rows = make_rc_rows(&[&["banana"], &["10"], &["apple"]]);
+        let rows = make_rows(&[&["banana"], &["10"], &["apple"]]);
         let indices = vec![0, 1, 2];
         let result = sort_indices(&rows, &indices, 0, false, SortDirection::Ascending);
         assert_eq!(result, vec![1, 2, 0]);
@@ -893,14 +988,14 @@ mod tests {
 
     #[test]
     fn sort_empty_indices() {
-        let rows = make_rc_rows(&[&["A"]]);
+        let rows = make_rows(&[&["A"]]);
         let result = sort_indices(&rows, &[], 0, false, SortDirection::Ascending);
         assert!(result.is_empty());
     }
 
     #[test]
     fn sort_with_missing_column() {
-        let rows = make_rc_rows(&[&["A", "1"], &["B"]]);
+        let rows = make_rows(&[&["A", "1"], &["B"]]);
         let indices = vec![0, 1];
         let result = sort_indices(&rows, &indices, 1, true, SortDirection::Ascending);
         assert_eq!(result, vec![1, 0]);
@@ -908,7 +1003,7 @@ mod tests {
 
     #[test]
     fn sort_numeric_with_nan() {
-        let rows = make_rc_rows(&[&["NaN"], &["0"], &["1"]]);
+        let rows = make_rows(&[&["NaN"], &["0"], &["1"]]);
         let indices = vec![0, 1, 2];
         let result = sort_indices(&rows, &indices, 0, true, SortDirection::Ascending);
         assert_eq!(result, vec![1, 2, 0]);
@@ -916,7 +1011,7 @@ mod tests {
 
     #[test]
     fn sort_numeric_with_nan_descending() {
-        let rows = make_rc_rows(&[&["NaN"], &["0"], &["1"]]);
+        let rows = make_rows(&[&["NaN"], &["0"], &["1"]]);
         let indices = vec![0, 1, 2];
         let result = sort_indices(&rows, &indices, 0, true, SortDirection::Descending);
         assert_eq!(result, vec![0, 2, 1]);
@@ -961,28 +1056,28 @@ mod tests {
 
     #[test]
     fn extract_values_basic() {
-        let rows = make_rc_rows(&[&["10", "a"], &["20", "b"], &["30", "c"]]);
+        let rows = make_rows(&[&["10", "a"], &["20", "b"], &["30", "c"]]);
         let result = extract_column_values(&rows, &[0, 1, 2], 0);
         assert_eq!(result, vec![(0, 10.0), (1, 20.0), (2, 30.0)]);
     }
 
     #[test]
     fn extract_values_skips_non_numeric() {
-        let rows = make_rc_rows(&[&["10"], &["abc"], &["30"]]);
+        let rows = make_rows(&[&["10"], &["abc"], &["30"]]);
         let result = extract_column_values(&rows, &[0, 1, 2], 0);
         assert_eq!(result, vec![(0, 10.0), (2, 30.0)]);
     }
 
     #[test]
     fn extract_values_respects_indices() {
-        let rows = make_rc_rows(&[&["10"], &["20"], &["30"]]);
+        let rows = make_rows(&[&["10"], &["20"], &["30"]]);
         let result = extract_column_values(&rows, &[0, 2], 0);
         assert_eq!(result, vec![(0, 10.0), (2, 30.0)]);
     }
 
     #[test]
     fn extract_values_empty_indices() {
-        let rows = make_rc_rows(&[&["10"]]);
+        let rows = make_rows(&[&["10"]]);
         let result = extract_column_values(&rows, &[], 0);
         assert!(result.is_empty());
     }
@@ -1213,28 +1308,28 @@ mod tests {
 
     #[test]
     fn extract_values_skips_nan_and_infinity() {
-        let rows = make_rc_rows(&[&["10"], &["NaN"], &["inf"], &["-inf"], &["30"]]);
+        let rows = make_rows(&[&["10"], &["NaN"], &["inf"], &["-inf"], &["30"]]);
         let result = extract_column_values(&rows, &[0, 1, 2, 3, 4], 0);
         assert_eq!(result, vec![(0, 10.0), (4, 30.0)]);
     }
 
     #[test]
     fn extract_values_out_of_bounds_index() {
-        let rows = make_rc_rows(&[&["10"], &["20"]]);
+        let rows = make_rows(&[&["10"], &["20"]]);
         let result = extract_column_values(&rows, &[0, 5, 1], 0);
         assert_eq!(result, vec![(0, 10.0), (1, 20.0)]);
     }
 
     #[test]
     fn extract_values_out_of_bounds_col() {
-        let rows = make_rc_rows(&[&["10"], &["20"]]);
+        let rows = make_rows(&[&["10"], &["20"]]);
         let result = extract_column_values(&rows, &[0, 1], 5);
         assert!(result.is_empty());
     }
 
     #[test]
     fn extract_values_empty_string() {
-        let rows = make_rc_rows(&[&["10"], &[""], &["30"]]);
+        let rows = make_rows(&[&["10"], &[""], &["30"]]);
         let result = extract_column_values(&rows, &[0, 1, 2], 0);
         assert_eq!(result, vec![(0, 10.0), (2, 30.0)]);
     }
@@ -1288,7 +1383,7 @@ mod tests {
 
     #[test]
     fn extract_values_negative_numbers() {
-        let rows = make_rc_rows(&[&["-3.14"], &["2.5"], &["-0.001"]]);
+        let rows = make_rows(&[&["-3.14"], &["2.5"], &["-0.001"]]);
         let result = extract_column_values(&rows, &[0, 1, 2], 0);
         assert_eq!(result, vec![(0, -3.14), (1, 2.5), (2, -0.001)]);
     }
@@ -1297,28 +1392,28 @@ mod tests {
 
     #[test]
     fn scatter_pairs_basic() {
-        let rows = make_rc_rows(&[&["1", "10"], &["2", "20"], &["3", "30"]]);
+        let rows = make_rows(&[&["1", "10"], &["2", "20"], &["3", "30"]]);
         let result = extract_scatter_pairs(&rows, &[0, 1, 2], 0, 1);
         assert_eq!(result, vec![(1.0, 10.0), (2.0, 20.0), (3.0, 30.0)]);
     }
 
     #[test]
     fn scatter_pairs_skips_non_numeric_in_either_column() {
-        let rows = make_rc_rows(&[&["1", "10"], &["abc", "20"], &["3", "xyz"], &["4", "40"]]);
+        let rows = make_rows(&[&["1", "10"], &["abc", "20"], &["3", "xyz"], &["4", "40"]]);
         let result = extract_scatter_pairs(&rows, &[0, 1, 2, 3], 0, 1);
         assert_eq!(result, vec![(1.0, 10.0), (4.0, 40.0)]);
     }
 
     #[test]
     fn scatter_pairs_empty_indices() {
-        let rows = make_rc_rows(&[&["1", "10"]]);
+        let rows = make_rows(&[&["1", "10"]]);
         let result = extract_scatter_pairs(&rows, &[], 0, 1);
         assert!(result.is_empty());
     }
 
     #[test]
     fn scatter_pairs_filters_nan_infinity() {
-        let rows = make_rc_rows(&[&["1", "NaN"], &["inf", "2"], &["3", "4"]]);
+        let rows = make_rows(&[&["1", "NaN"], &["inf", "2"], &["3", "4"]]);
         let result = extract_scatter_pairs(&rows, &[0, 1, 2], 0, 1);
         assert_eq!(result, vec![(3.0, 4.0)]);
     }
@@ -1327,7 +1422,7 @@ mod tests {
 
     #[test]
     fn column_stats_basic() {
-        let rows = make_rc_rows(&[&["10"], &["20"], &["30"]]);
+        let rows = make_rows(&[&["10"], &["20"], &["30"]]);
         let stats = compute_column_stats(&rows, &[0, 1, 2], 0).unwrap();
         assert_eq!(stats.count, 3);
         assert!((stats.sum - 60.0).abs() < f64::EPSILON);
@@ -1341,7 +1436,7 @@ mod tests {
 
     #[test]
     fn column_stats_single_value() {
-        let rows = make_rc_rows(&[&["42"]]);
+        let rows = make_rows(&[&["42"]]);
         let stats = compute_column_stats(&rows, &[0], 0).unwrap();
         assert_eq!(stats.count, 1);
         assert!((stats.sum - 42.0).abs() < f64::EPSILON);
@@ -1354,7 +1449,7 @@ mod tests {
 
     #[test]
     fn column_stats_skips_non_numeric() {
-        let rows = make_rc_rows(&[&["10"], &["abc"], &["30"]]);
+        let rows = make_rows(&[&["10"], &["abc"], &["30"]]);
         let stats = compute_column_stats(&rows, &[0, 1, 2], 0).unwrap();
         assert_eq!(stats.count, 2);
         assert!((stats.sum - 40.0).abs() < f64::EPSILON);
@@ -1362,19 +1457,19 @@ mod tests {
 
     #[test]
     fn column_stats_no_numeric_values() {
-        let rows = make_rc_rows(&[&["abc"], &["def"]]);
+        let rows = make_rows(&[&["abc"], &["def"]]);
         assert!(compute_column_stats(&rows, &[0, 1], 0).is_none());
     }
 
     #[test]
     fn column_stats_empty_indices() {
-        let rows = make_rc_rows(&[&["10"]]);
+        let rows = make_rows(&[&["10"]]);
         assert!(compute_column_stats(&rows, &[], 0).is_none());
     }
 
     #[test]
     fn column_stats_respects_filtered_indices() {
-        let rows = make_rc_rows(&[&["10"], &["20"], &["30"], &["40"]]);
+        let rows = make_rows(&[&["10"], &["20"], &["30"], &["40"]]);
         let stats = compute_column_stats(&rows, &[1, 3], 0).unwrap();
         assert_eq!(stats.count, 2);
         assert!((stats.sum - 60.0).abs() < f64::EPSILON);
@@ -1385,14 +1480,14 @@ mod tests {
 
     #[test]
     fn column_stats_median_odd() {
-        let rows = make_rc_rows(&[&["5"], &["1"], &["3"], &["4"], &["2"]]);
+        let rows = make_rows(&[&["5"], &["1"], &["3"], &["4"], &["2"]]);
         let stats = compute_column_stats(&rows, &[0, 1, 2, 3, 4], 0).unwrap();
         assert!((stats.median - 3.0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn column_stats_median_even() {
-        let rows = make_rc_rows(&[&["4"], &["1"], &["3"], &["2"]]);
+        let rows = make_rows(&[&["4"], &["1"], &["3"], &["2"]]);
         let stats = compute_column_stats(&rows, &[0, 1, 2, 3], 0).unwrap();
         assert!((stats.median - 2.5).abs() < f64::EPSILON); // (2+3)/2
     }
@@ -1459,7 +1554,7 @@ mod tests {
         assert_eq!(pattern, "unknown:x");
     }
 
-    // --- filter_rows_regex ---
+    // --- anchored_position ---
 
     #[test]
     fn anchored_position_keeps_unchanged_rows() {
@@ -1500,51 +1595,38 @@ mod tests {
         assert_eq!(anchored_position(&[0, 1], &[0, 1], 9), Some(1));
     }
 
+    // --- RowFilter: `&` regex ---
+
     #[test]
     fn filter_rows_regex_basic() {
-        let rows = make_rc_rows(&[&["Tokyo"], &["Osaka"], &["Kyoto"]]);
-        let indices = vec![0, 1, 2];
-        let result = filter_rows_regex(&rows, &indices, "to", None).unwrap();
-        assert_eq!(result, vec![0, 2]); // Tokyo, Kyoto
+        let rows = make_rows(&[&["Tokyo"], &["Osaka"], &["Kyoto"]]);
+        // Tokyo, Kyoto
+        assert_eq!(filter_all(&rows, "", "to", None), (vec![0, 2], false));
     }
 
     #[test]
     fn filter_rows_regex_column_specific() {
-        let rows = make_rc_rows(&[&["Alice", "Tokyo"], &["Bob", "Osaka"], &["Carol", "Tokyo"]]);
-        let indices = vec![0, 1, 2];
-        let result = filter_rows_regex(&rows, &indices, "tokyo", Some(1)).unwrap();
-        assert_eq!(result, vec![0, 2]);
+        let rows = make_rows(&[&["Alice", "Tokyo"], &["Bob", "Osaka"], &["Carol", "Tokyo"]]);
+        assert_eq!(filter_all(&rows, "", "tokyo", Some(1)), (vec![0, 2], false));
     }
 
     #[test]
     fn filter_rows_regex_empty_pattern() {
-        let rows = make_rc_rows(&[&["a"], &["b"]]);
-        let indices = vec![0, 1];
-        let result = filter_rows_regex(&rows, &indices, "", None).unwrap();
-        assert_eq!(result, vec![0, 1]);
+        let rows = make_rows(&[&["a"], &["b"]]);
+        assert_eq!(filter_all(&rows, "", "", None), (vec![0, 1], false));
     }
 
     #[test]
     fn filter_rows_regex_invalid_pattern() {
-        let rows = make_rc_rows(&[&["a"]]);
-        assert!(filter_rows_regex(&rows, &[0], "[bad", None).is_err());
-    }
-
-    #[test]
-    fn filter_rows_regex_respects_indices() {
-        let rows = make_rc_rows(&[&["Tokyo"], &["Osaka"], &["Kyoto"]]);
-        let indices = vec![0, 1]; // only Tokyo, Osaka
-        let result = filter_rows_regex(&rows, &indices, "to", None).unwrap();
-        assert_eq!(result, vec![0]); // only Tokyo
+        let rows = make_rows(&[&["a"]]);
+        assert_eq!(filter_all(&rows, "", "[bad", None), (vec![0], true));
     }
 
     #[test]
     fn filter_rows_regex_out_of_range_col() {
         // target_col=Some(99) is beyond any row's columns — should match nothing
-        let rows = make_rc_rows(&[&["Tokyo"], &["Osaka"]]);
-        let indices = vec![0, 1];
-        let result = filter_rows_regex(&rows, &indices, "Tokyo", Some(99)).unwrap();
-        assert_eq!(result, Vec::<usize>::new());
+        let rows = make_rows(&[&["Tokyo"], &["Osaka"]]);
+        assert_eq!(filter_all(&rows, "", "Tokyo", Some(99)), (vec![], false));
     }
 
     // --- copied_status_message ---
@@ -1566,7 +1648,7 @@ mod tests {
 
     #[test]
     fn export_json_basic() {
-        let rows = make_rc_rows(&[&["Alice", "30"], &["Bob", "25"]]);
+        let rows = make_rows(&[&["Alice", "30"], &["Bob", "25"]]);
         let result = export_json(&["name".into(), "age".into()], &rows, &[0, 1], &[0, 1]);
         assert_eq!(
             result,
@@ -1576,7 +1658,7 @@ mod tests {
 
     #[test]
     fn export_json_special_chars() {
-        let rows = make_rc_rows(&[&["say \"hi\"", "line1\nline2"]]);
+        let rows = make_rows(&[&["say \"hi\"", "line1\nline2"]]);
         let result = export_json(&["msg".into(), "note".into()], &rows, &[0], &[0, 1]);
         assert!(result.contains("say \\\"hi\\\""));
         assert!(result.contains("line1\\nline2"));
@@ -1584,14 +1666,14 @@ mod tests {
 
     #[test]
     fn export_json_empty_rows() {
-        let rows = make_rc_rows(&[&["a"]]);
+        let rows = make_rows(&[&["a"]]);
         let result = export_json(&["col".into()], &rows, &[], &[0]);
         assert_eq!(result, "[]\n");
     }
 
     #[test]
     fn export_json_visible_cols() {
-        let rows = make_rc_rows(&[&["Alice", "30", "Tokyo"]]);
+        let rows = make_rows(&[&["Alice", "30", "Tokyo"]]);
         let result = export_json(
             &["name".into(), "age".into(), "city".into()],
             &rows,
@@ -1607,7 +1689,7 @@ mod tests {
 
     #[test]
     fn export_markdown_basic() {
-        let rows = make_rc_rows(&[&["Alice", "30"], &["Bob", "25"]]);
+        let rows = make_rows(&[&["Alice", "30"], &["Bob", "25"]]);
         let result = export_markdown(&["name".into(), "age".into()], &rows, &[0, 1], &[0, 1]);
         assert_eq!(
             result,
@@ -1617,21 +1699,21 @@ mod tests {
 
     #[test]
     fn export_markdown_pipe_escape() {
-        let rows = make_rc_rows(&[&["a|b"]]);
+        let rows = make_rows(&[&["a|b"]]);
         let result = export_markdown(&["val".into()], &rows, &[0], &[0]);
         assert!(result.contains("a\\|b"));
     }
 
     #[test]
     fn export_markdown_empty_rows() {
-        let rows = make_rc_rows(&[&["a"]]);
+        let rows = make_rows(&[&["a"]]);
         let result = export_markdown(&["col".into()], &rows, &[], &[0]);
         assert_eq!(result, "| col |\n| --- |\n");
     }
 
     #[test]
     fn export_markdown_visible_cols() {
-        let rows = make_rc_rows(&[&["Alice", "30", "Tokyo"]]);
+        let rows = make_rows(&[&["Alice", "30", "Tokyo"]]);
         let result = export_markdown(
             &["name".into(), "age".into(), "city".into()],
             &rows,
@@ -1644,21 +1726,21 @@ mod tests {
 
     #[test]
     fn export_json_control_chars() {
-        let rows = make_rc_rows(&[&["a\x00b\x08c\x1f"]]);
+        let rows = make_rows(&[&["a\x00b\x08c\x1f"]]);
         let result = export_json(&["val".into()], &rows, &[0], &[0]);
         assert!(result.contains("a\\u0000b\\u0008c\\u001f"));
     }
 
     #[test]
     fn export_markdown_newline_in_cell() {
-        let rows = make_rc_rows(&[&["line1\nline2"]]);
+        let rows = make_rows(&[&["line1\nline2"]]);
         let result = export_markdown(&["val".into()], &rows, &[0], &[0]);
         assert!(result.contains("| line1 line2 |"));
     }
 
     #[test]
     fn export_json_out_of_bounds_index() {
-        let rows = make_rc_rows(&[&["Alice"]]);
+        let rows = make_rows(&[&["Alice"]]);
         let result = export_json(&["name".into()], &rows, &[0, 99], &[0]);
         // Row index 99 is skipped safely; only Alice appears
         assert_eq!(result, "[\n  {\"name\": \"Alice\"}\n]\n");
@@ -1666,28 +1748,28 @@ mod tests {
 
     #[test]
     fn export_json_header_escape() {
-        let rows = make_rc_rows(&[&["val"]]);
+        let rows = make_rows(&[&["val"]]);
         let result = export_json(&["col\"name".into()], &rows, &[0], &[0]);
         assert!(result.contains("\"col\\\"name\""));
     }
 
     #[test]
     fn export_markdown_header_pipe_escape() {
-        let rows = make_rc_rows(&[&["val"]]);
+        let rows = make_rows(&[&["val"]]);
         let result = export_markdown(&["col|name".into()], &rows, &[0], &[0]);
         assert!(result.contains("col\\|name"));
     }
 
     #[test]
     fn export_json_empty_visible_cols() {
-        let rows = make_rc_rows(&[&["Alice"]]);
+        let rows = make_rows(&[&["Alice"]]);
         let result = export_json(&["name".into()], &rows, &[0], &[]);
         assert_eq!(result, "[]\n");
     }
 
     #[test]
     fn export_markdown_empty_visible_cols() {
-        let rows = make_rc_rows(&[&["Alice"]]);
+        let rows = make_rows(&[&["Alice"]]);
         let result = export_markdown(&["name".into()], &rows, &[0], &[]);
         assert_eq!(result, "");
     }
@@ -1696,21 +1778,21 @@ mod tests {
     fn export_json_out_of_bounds_first() {
         // When the first filtered index is out of bounds, the written counter
         // prevents a leading comma from appearing in the output.
-        let rows = make_rc_rows(&[&["Alice"]]);
+        let rows = make_rows(&[&["Alice"]]);
         let result = export_json(&["name".into()], &rows, &[99, 0], &[0]);
         assert_eq!(result, "[\n  {\"name\": \"Alice\"}\n]\n");
     }
 
     #[test]
     fn export_markdown_cr_in_cell() {
-        let rows = make_rc_rows(&[&["line1\r\nline2"]]);
+        let rows = make_rows(&[&["line1\r\nline2"]]);
         let result = export_markdown(&["val".into()], &rows, &[0], &[0]);
         assert!(result.contains("| line1  line2 |"));
     }
 
     #[test]
     fn export_json_duplicate_headers() {
-        let rows = make_rc_rows(&[&["Alice", "Bob", "30"]]);
+        let rows = make_rows(&[&["Alice", "Bob", "30"]]);
         let result = export_json(
             &["name".into(), "name".into(), "value".into()],
             &rows,
@@ -1725,7 +1807,7 @@ mod tests {
 
     #[test]
     fn export_json_triple_duplicate_headers() {
-        let rows = make_rc_rows(&[&["a", "b", "c"]]);
+        let rows = make_rows(&[&["a", "b", "c"]]);
         let result = export_json(
             &["x".into(), "x".into(), "x".into()],
             &rows,
@@ -1740,7 +1822,7 @@ mod tests {
 
     #[test]
     fn export_json_empty_duplicate_headers() {
-        let rows = make_rc_rows(&[&["a", "b"]]);
+        let rows = make_rows(&[&["a", "b"]]);
         let result = export_json(&["".into(), "".into()], &rows, &[0], &[0, 1]);
         assert_eq!(result, "[\n  {\"\": \"a\", \"_2\": \"b\"}\n]\n");
     }

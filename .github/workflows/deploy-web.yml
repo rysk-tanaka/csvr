@@ -95,6 +95,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    # deployments: write records previews as GitHub deployments, which put a "View deployment"
+    # button on the pull request. It cannot write to the pull request or its comments.
+    permissions:
+      contents: read
+      deployments: write
     concurrency:
       group: deploy-web-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'production' }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -106,6 +111,14 @@ jobs:
         with:
           sparse-checkout: wrangler.jsonc
           sparse-checkout-cone-mode: false
+      # A guard against adding one by mistake. It is not a security boundary: anyone who can push
+      # a branch here can change this workflow in the same pull request.
+      - name: Check wrangler.jsonc has no build command
+        run: |
+          if grep -q '"build"' wrangler.jsonc; then
+            echo "::error file=wrangler.jsonc::wrangler.jsonc must not have a build command; it would run in this job, with the Cloudflare secrets"
+            exit 1
+          fi
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: web-dist
@@ -118,6 +131,26 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: '4.153.0'
           command: deploy
+      # A deployment on the pull request's head commit, so the pull request shows it. Previews of
+      # all pull requests share the `preview` environment.
+      - name: Start preview deployment
+        id: deployment
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # required_contexts is empty so the deployment does not wait for this commit's other checks.
+          id=$(jq -n --arg ref "$HEAD_SHA" --arg pr "$PR_NUMBER" '{
+            ref: $ref, environment: "preview", description: ("Preview of PR #" + $pr),
+            auto_merge: false, required_contexts: [],
+            transient_environment: true, production_environment: false
+          }' | gh api "repos/${GITHUB_REPOSITORY}/deployments" --input - --jq .id)
+          gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}/statuses" \
+            -f state=in_progress -f log_url="$RUN_URL" --silent
+          echo "id=${id}" >> "$GITHUB_OUTPUT"
       - name: Upload preview
         id: preview
         if: github.event_name == 'pull_request'
@@ -127,7 +160,29 @@ jobs:
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
           wranglerVersion: '4.153.0'
           command: versions upload --preview-alias pr-${{ github.event.pull_request.number }}
-      # Written to the job summary rather than a PR comment, which would need write permission.
+      - name: Finish preview deployment
+        if: always() && steps.deployment.outputs.id
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+          OUTCOME: ${{ steps.preview.outcome }}
+          OUTPUT: ${{ steps.preview.outputs.command-output }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # The alias URL stays the same across pushes to the pull request.
+          url=$(printf '%s\n' "$OUTPUT" | grep -E -o "https://pr-${PR_NUMBER}-[^[:space:]]+\.workers\.dev" | head -n 1 || true)
+          if [ "$OUTCOME" = success ] && [ -n "$url" ]; then
+            state=success
+          else
+            state=failure
+          fi
+          # auto_inactive=false, or each pull request's preview would mark the others inactive.
+          args=(-f state="$state" -f log_url="$RUN_URL" -F auto_inactive=false)
+          if [ -n "$url" ]; then
+            args+=(-f environment_url="$url")
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses" "${args[@]}" --silent
       - name: Show preview URLs
         if: github.event_name == 'pull_request'
         env:

@@ -39,8 +39,10 @@ jobs:
   deploy-web:
     needs: create-release
     if: needs.create-release.outputs.released == 'true'
+    # A called workflow gets no more than this: its deploy job records PR previews as deployments.
     permissions:
       contents: read
+      deployments: write
     uses: ./.github/workflows/deploy-web.yml
     secrets:
       CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}

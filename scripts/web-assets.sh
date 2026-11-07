@@ -114,7 +114,7 @@ cat > "$TRUNK_STAGING_DIR/licenses/index.html" <<'HTML'
       <li><a href="IBM-Plex-OFL.txt">IBM Plex Sans / IBM Plex Sans JP</a>（OFL）</li>
       <li><a href="icon-LICENSE.txt">アイコン</a>（Lucide、ISC）</li>
     </ul>
-    <p><a href="../">csvr に戻る</a></p>
+    <p><a href="../">csvr を開く</a></p>
   </body>
 </html>
 HTML

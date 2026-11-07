@@ -5,9 +5,10 @@
 //! The text here must not make the page download the Japanese font (about 7MB). gpui_web
 //! (v1.27.0, `is_cjk` in `gpui_web/src/canvas_fallback.rs`) draws kanji, kana, Hangul and the
 //! punctuation `、。〈〉《》「」『』【】〔〕（）［］｛｝，．！？：；・ー々〆` with the browser's font,
-//! and the bundled IBM Plex Sans draws ASCII. Any other character (`〜`, `①`, `※`, `→`, `×`,
-//! full-width letters and digits, ...) is reported as missing and loads the font each time the
-//! page opens, so use ASCII (`->`, `+`) for those. Check this again when gpui_web changes.
+//! and the bundled IBM Plex Sans draws ASCII, Latin letters and some symbols (`→` and `×` are
+//! there). A character neither covers (`〜`, `①`, `※`, full-width letters and digits, ...) is
+//! reported as missing and loads the font each time the page opens, so write those in ASCII or
+//! reword. Check this again when gpui_web or the bundled font changes.
 
 use gpui::prelude::*;
 use gpui::{
@@ -37,7 +38,7 @@ const SAMPLE_CSV: &str = "\
 
 /// The main keys, as `key_bindings` and `CsvrApp`'s `on_key_down` handle them. Only `cmd` is
 /// listed; a line below the table says `ctrl` works too.
-const KEYS: [(&str, &str); 10] = [
+const KEYS: [(&str, &str); 11] = [
     ("/ または Cmd+F", "検索（文字を含む行に絞り込む）"),
     ("&", "行を正規表現で絞り込む（列名:パターン で列を指定）"),
     ("*", "列名の正規表現で、表示する列を選ぶ"),
@@ -47,6 +48,7 @@ const KEYS: [(&str, &str); 10] = [
     ("Cmd+C", "選んだセルや行をコピー"),
     ("Cmd+Shift+J / M", "表示中の表を JSON / Markdown でコピー"),
     ("Cmd+G", "グラフ"),
+    ("m", "メタデータの行を表示する、隠す（ある場合）"),
     ("Esc", "入力欄を閉じる、選択を解除"),
 ];
 
@@ -115,7 +117,6 @@ impl WebRoot {
         let focus = table.read(cx).focus_handle.clone();
         window.focus(&focus, cx);
         self.screen = Screen::Table(table);
-        self.message = None;
         cx.notify();
     }
 

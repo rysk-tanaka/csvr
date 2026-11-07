@@ -12,7 +12,7 @@ use wasm_bindgen::closure::Closure;
 
 use csvr_core::data::{CsvData, SpreadsheetFormat, decode_to_utf8};
 
-use crate::app::{CsvrApp, OpenFile, ShortcutModifier, key_bindings};
+use crate::app::{CsvrApp, KEY_CONTEXT, OpenFile, ShortcutModifier, key_bindings};
 use crate::browser::js_error;
 
 const SAMPLE_CSV: &str = "\
@@ -78,12 +78,12 @@ pub(crate) fn run() {
             ShortcutModifier::Ctrl,
         ]));
         // Only the browser build opens files from the app. GPUI prevents the browser's own
-        // shortcut for keys it handles, so the browser's open dialog does not appear too. Unlike
-        // the other bindings, these also apply while the IME is composing: otherwise the key
-        // would reach the browser, whose dialog opens a picked file in place of the page.
+        // shortcut for keys it handles, so the browser's open dialog does not appear too. While
+        // the IME is composing these do not apply, like the other bindings (opening a file would
+        // drop the composition); gpui_web then prevents the browser's shortcut for every key.
         cx.bind_keys([
-            KeyBinding::new("cmd-o", OpenFile, Some("CsvrApp")),
-            KeyBinding::new("ctrl-o", OpenFile, Some("CsvrApp")),
+            KeyBinding::new("cmd-o", OpenFile, Some(KEY_CONTEXT)),
+            KeyBinding::new("ctrl-o", OpenFile, Some(KEY_CONTEXT)),
         ]);
 
         let sample = CsvData::from_reader(SAMPLE_CSV.as_bytes()).expect("the sample CSV is valid");
@@ -255,6 +255,9 @@ impl FileOpener {
     /// by a later one only goes to the console, so its message does not cover the later file.
     fn report_failure(&self, id: u64, message: String) {
         log::error!("{message}");
+        // The status bar is one line, and GPUI breaks lines at newlines even with
+        // `whitespace_nowrap`; file names and loader errors can contain them.
+        let message = message.replace(['\r', '\n'], " ");
         if self.latest.get() != id {
             return;
         }

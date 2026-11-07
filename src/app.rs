@@ -47,7 +47,7 @@ actions!(
 /// otherwise close the bar under the composition. The view sets `ime_editing` in its key
 /// context (see `render`), and GPUI redraws a changed view before it dispatches the next key,
 /// so the context is current.
-const KEY_CONTEXT: &str = "CsvrApp && !ime_editing";
+pub(crate) const KEY_CONTEXT: &str = "CsvrApp && !ime_editing";
 
 /// Modifier for the table view's shortcuts. The browser build binds both, because its `cmd`
 /// is the Meta key on every OS.

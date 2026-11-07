@@ -34,10 +34,15 @@ fn start_clipboard_write(text: &str) -> Result<js_sys::Promise, String> {
     Ok(navigator.clipboard().write_text(text))
 }
 
-/// The message of a JS error, without the stack trace its `Debug` output carries.
+/// The message of a JS error, without the stack trace its `Debug` output carries. The status bar
+/// shows it, so a rejection that is not an `Error` gives its text, or a plain description,
+/// rather than the `JsValue(...)` debug form.
 pub(crate) fn js_error(value: &JsValue) -> String {
-    match value.dyn_ref::<js_sys::Error>() {
-        Some(error) => String::from(error.message()),
-        None => format!("{value:?}"),
+    if let Some(error) = value.dyn_ref::<js_sys::Error>() {
+        return String::from(error.message());
     }
+    if let Some(text) = value.as_string() {
+        return text;
+    }
+    "unknown error".into()
 }

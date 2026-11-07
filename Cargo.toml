@@ -16,10 +16,23 @@ license = "MIT"
 [dependencies]
 csvr-core = { path = "crates/csvr-core" }
 gpui = { git = "https://github.com/zed-industries/zed.git", tag = "v1.27.0" }
-gpui_platform = { git = "https://github.com/zed-industries/zed.git", tag = "v1.27.0", features = ["font-kit"] }
+# Without default features: `multithreaded` makes the browser build need nightly and cross-origin
+# isolation. It only affects gpui_web, so the native build is unchanged.
+gpui_platform = { git = "https://github.com/zed-industries/zed.git", tag = "v1.27.0", default-features = false, features = ["font-kit"] }
 futures-lite = "2.6.1"
 regex.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
 objc = "0.2"
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+# Used directly to choose the CJK font fallback. Default features off for the same reason as above.
+gpui_web = { git = "https://github.com/zed-industries/zed.git", tag = "v1.27.0", default-features = false }
+wasm-bindgen = "0.2.130"
+wasm-bindgen-futures = "0.4.80"
+js-sys = "0.3.107"
+web-sys = { version = "0.3.107", features = ["Window", "Document", "Event", "EventTarget", "DragEvent", "DataTransfer", "FileList", "File", "Blob"] }
+log = "0.4.35"
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"cargo-clippy\"))"] }

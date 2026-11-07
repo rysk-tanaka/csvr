@@ -3,7 +3,7 @@ use std::{ops::Range, rc::Rc, sync::Arc, time::Duration};
 use futures_lite::future::yield_now;
 
 use gpui::{
-    App, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyDownEvent,
+    App, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyBinding, KeyDownEvent,
     ListHorizontalSizingBehavior, Render, SharedString, Task, UniformListScrollHandle, Window,
     actions, canvas, div, prelude::*, px, rgb, uniform_list,
 };
@@ -35,6 +35,32 @@ actions!(
         Quit
     ]
 );
+
+/// Modifier for the table view's shortcuts. The browser build binds both, because its `cmd`
+/// is the Meta key on every OS.
+#[derive(Clone, Copy)]
+pub(crate) enum ShortcutModifier {
+    Cmd,
+    #[cfg_attr(not(target_family = "wasm"), allow(dead_code))]
+    Ctrl,
+}
+
+pub(crate) fn key_bindings(modifier: ShortcutModifier) -> Vec<KeyBinding> {
+    // `KeyBinding::new` takes `&'static str`, so the keystrokes are spelled out per modifier.
+    let [find, chart, copy, json, markdown] = match modifier {
+        ShortcutModifier::Cmd => ["cmd-f", "cmd-g", "cmd-c", "cmd-shift-j", "cmd-shift-m"],
+        ShortcutModifier::Ctrl => ["ctrl-f", "ctrl-g", "ctrl-c", "ctrl-shift-j", "ctrl-shift-m"],
+    };
+    let context = Some("CsvrApp");
+    vec![
+        KeyBinding::new(find, ToggleSearch, context),
+        KeyBinding::new("escape", DismissSearch, context),
+        KeyBinding::new(chart, ToggleChart, context),
+        KeyBinding::new(copy, CopySelection, context),
+        KeyBinding::new(json, ExportJson, context),
+        KeyBinding::new(markdown, ExportMarkdown, context),
+    ]
+}
 
 // Catppuccin Mocha palette
 const BG_BASE: u32 = 0x1e1e2e;

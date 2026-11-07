@@ -95,7 +95,12 @@ cat data.csv | csvr
 - 大きいファイルでは、読み込みとソートのあいだ画面が止まります
 - 日本語や記号が初めて出たときに、日本語フォント（約 11MB）を同じサイトから読み込みます
 
-公開しているファイルのライセンスは `/licenses/` にあります（`csvr-LICENSE.txt`、`THIRD_PARTY_LICENSES.html`、`IBM-Plex-OFL.txt`、`icon-LICENSE.txt`）。
+公開しているファイルのライセンスは、サイトの次のパスにあります。
+
+- `/licenses/csvr-LICENSE.txt` — csvr（MIT）
+- `/licenses/THIRD_PARTY_LICENSES.html` — 依存クレート
+- `/licenses/IBM-Plex-OFL.txt` — IBM Plex Sans / IBM Plex Sans JP（OFL）
+- `/licenses/icon-LICENSE.txt` — アイコン（Lucide、ISC）
 
 ---
 

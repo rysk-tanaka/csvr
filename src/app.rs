@@ -1420,9 +1420,11 @@ impl Render for CsvrApp {
                                 .get(col_idx)
                                 .cloned()
                                 .unwrap_or_else(|| "".into());
+                            // Arrows rather than ▲▼: the browser build's bundled IBM Plex Sans has
+                            // them, so sorting does not make it download the Japanese font.
                             let indicator: SharedString = match self.sort_state {
-                                Some((c, SortDirection::Ascending)) if c == col_idx => "▲".into(),
-                                Some((c, SortDirection::Descending)) if c == col_idx => "▼".into(),
+                                Some((c, SortDirection::Ascending)) if c == col_idx => "↑".into(),
+                                Some((c, SortDirection::Descending)) if c == col_idx => "↓".into(),
                                 _ => "".into(),
                             };
                             let has_indicator = !indicator.is_empty();

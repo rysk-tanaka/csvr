@@ -31,8 +31,11 @@ gpui_web = { git = "https://github.com/zed-industries/zed.git", tag = "v1.27.0",
 wasm-bindgen = "0.2.130"
 wasm-bindgen-futures = "0.4.80"
 js-sys = "0.3.107"
-web-sys = { version = "0.3.107", features = ["Window", "Document", "Event", "EventTarget", "DragEvent", "DataTransfer", "FileList", "File", "Blob"] }
+web-sys = { version = "0.3.107", features = ["Window", "Document", "Event", "EventTarget", "DragEvent", "DataTransfer", "FileList", "File", "Blob", "Response", "RequestInit"] }
 log = "0.4.35"
+# Checks downloaded fonts before registering them, because `add_fonts` reports success even for a
+# font it cannot parse. Already in the tree through cosmic-text's fontdb.
+ttf-parser = { version = "0.25", default-features = false, features = ["std"] }
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(feature, values(\"cargo-clippy\"))"] }

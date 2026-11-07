@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use gpui::{App, AppContext, AsyncApp, WindowHandle, WindowOptions};
 use gpui_web::{CanvasFontFallback, WebBackendPreference, WebPlatform};
+use ttf_parser::Weight;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -22,6 +23,32 @@ const SAMPLE_CSV: &str = "\
 高橋,総務,39,720
 伊藤,開発,31,990
 ";
+
+/// A font downloaded when the bundled one lacks a character.
+struct FontFile {
+    url: &'static str,
+    /// Subresource Integrity hash. The browser rejects the response if the content differs, so a
+    /// compromised CDN cannot hand the page a different font.
+    integrity: &'static str,
+    weight: Weight,
+}
+
+/// IBM Plex Sans JP Regular and SemiBold, the Japanese edition of the bundled IBM Plex Sans. It also
+/// has the symbols the bundled font lacks (▲▼, full-width letters, ①, ㈱, ...). The npm package
+/// only ships WOFF and WOFF2, which cosmic-text cannot read, so the TTFs come from GitHub. The URLs
+/// are pinned to the commit of the `@ibm/plex-sans-jp@3.0.0` tag, and the content to its hash.
+const IBM_PLEX_SANS_JP: [FontFile; 2] = [
+    FontFile {
+        url: "https://cdn.jsdelivr.net/gh/IBM/plex@89cba80dad75561262e758f4b6ddd474c5119796/packages/plex-sans-jp/fonts/complete/ttf/unhinted/IBMPlexSansJP-Regular.ttf",
+        integrity: "sha384-/yQZjwaTcpaqocYFEcsa32pkb1RuXBjNCLOFAOqOLZ75hLANiYYjiKWMYS7ZOX/4",
+        weight: Weight::Normal,
+    },
+    FontFile {
+        url: "https://cdn.jsdelivr.net/gh/IBM/plex@89cba80dad75561262e758f4b6ddd474c5119796/packages/plex-sans-jp/fonts/complete/ttf/unhinted/IBMPlexSansJP-SemiBold.ttf",
+        integrity: "sha384-HsmSeI1bT3Exy/NcxEvE9gmfB11qUzPrmClQYUGzdkCvMIb0Hr9ct1l2VEhYzjua",
+        weight: Weight::SemiBold,
+    },
+];
 
 pub(crate) fn run() {
     gpui_platform::web_init();
@@ -46,6 +73,7 @@ pub(crate) fn run() {
             // no hint of what went wrong.
             log::error!("failed to load fonts: {e:#}");
         }
+        load_japanese_font_on_missing_glyphs(cx);
         cx.bind_keys(key_bindings(&[
             ShortcutModifier::Cmd,
             ShortcutModifier::Ctrl,
@@ -63,6 +91,103 @@ pub(crate) fn run() {
             Err(e) => log::error!("failed to open window: {e:#}"),
         }
     });
+}
+
+/// Loads IBM Plex Sans JP the first time some text has a character no font can draw. The two weights
+/// together are about 6MB to download, and the sample alone never needs them: gpui_web draws CJK
+/// with the browser's font and does not report it as missing.
+fn load_japanese_font_on_missing_glyphs(cx: &mut App) {
+    // Only one attempt per page. Each new character is reported, and so are characters the
+    // Japanese font lacks too, so a failed or useless download would otherwise be repeated.
+    let started = Rc::new(Cell::new(false));
+    cx.on_missing_glyphs(move |missing, cx| {
+        if started.replace(true) {
+            return;
+        }
+        let examples: Vec<&str> = missing
+            .iter()
+            .take(5)
+            .map(|glyph| glyph.grapheme())
+            .collect();
+        log::info!("no font has {examples:?}; loading IBM Plex Sans JP");
+        cx.spawn(async move |cx| load_japanese_font(cx).await)
+            .detach();
+    })
+    // Kept for the life of the page; dropping it would turn the reports off.
+    .detach();
+}
+
+async fn load_japanese_font(cx: &mut AsyncApp) {
+    let mut fonts = Vec::with_capacity(IBM_PLEX_SANS_JP.len());
+    for font in &IBM_PLEX_SANS_JP {
+        let url = font.url;
+        let checked = fetch_bytes(url, font.integrity)
+            .await
+            .and_then(|bytes| check_font(&bytes, font.weight).map(|()| bytes));
+        match checked {
+            Ok(bytes) => fonts.push(Cow::Owned(bytes)),
+            // Adding only one weight would mix typefaces between the header and the body.
+            Err(e) => {
+                log::error!("failed to load '{url}': {e}");
+                return;
+            }
+        }
+    }
+    cx.update(|cx| {
+        if let Err(e) = cx.text_system().add_fonts(fonts) {
+            log::error!("failed to add IBM Plex Sans JP: {e:#}");
+            return;
+        }
+        // Text already on screen keeps its old layout until it is drawn again.
+        cx.refresh_windows();
+        log::info!("loaded IBM Plex Sans JP");
+    });
+}
+
+async fn fetch_bytes(url: &str, integrity: &str) -> Result<Vec<u8>, String> {
+    let window = web_sys::window().ok_or("no window to fetch from")?;
+    let init = web_sys::RequestInit::new();
+    init.set_integrity(integrity);
+    // The browser gives the same error for a network failure and an integrity mismatch.
+    let response = wasm_bindgen_futures::JsFuture::from(window.fetch_with_str_and_init(url, &init))
+        .await
+        .map_err(|e| format!("network error or integrity mismatch: {}", js_error(&e)))?;
+    let response: web_sys::Response = response
+        .dyn_into()
+        .map_err(|e| format!("not a response: {}", js_error(&e)))?;
+    if !response.ok() {
+        return Err(format!("HTTP {}", response.status()));
+    }
+    let buffer = response.array_buffer().map_err(|e| js_error(&e))?;
+    let buffer = wasm_bindgen_futures::JsFuture::from(buffer)
+        .await
+        .map_err(|e| js_error(&e))?;
+    Ok(js_sys::Uint8Array::new(&buffer).to_vec())
+}
+
+/// The message of a JS error, without the stack trace its `Debug` output carries.
+fn js_error(value: &wasm_bindgen::JsValue) -> String {
+    match value.dyn_ref::<js_sys::Error>() {
+        Some(error) => String::from(error.message()),
+        None => format!("{value:?}"),
+    }
+}
+
+/// `add_fonts` reports success even when it cannot parse a font, so the bytes are checked here
+/// before they are added.
+fn check_font(bytes: &[u8], weight: Weight) -> Result<(), String> {
+    let face = ttf_parser::Face::parse(bytes, 0).map_err(|e| format!("not a font: {e}"))?;
+    if face.weight() != weight {
+        return Err(format!(
+            "weight is {}, expected {}",
+            face.weight().to_number(),
+            weight.to_number()
+        ));
+    }
+    if face.glyph_index('▲').is_none() {
+        return Err("the font has no ▲".to_string());
+    }
+    Ok(())
 }
 
 /// gpui_web only stops the browser from opening dropped files; it does not hand them to the app,

@@ -62,7 +62,7 @@ impl Focusable for CsvrApp {
 
 // ウィンドウ作成時にフォーカスを設定
 |window, cx| {
-    let entity = cx.new(|cx| CsvrApp::new(data, cx));
+    let entity = cx.new(|cx| CsvrApp::new(data, window, cx));
     let focus = entity.read(cx).focus_handle.clone();
     window.focus(&focus, cx);
     entity

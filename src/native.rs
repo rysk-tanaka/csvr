@@ -154,7 +154,7 @@ pub(crate) fn run() {
                     ..Default::default()
                 },
                 |window, cx| {
-                    let entity = cx.new(|cx| CsvrApp::new(data, cx));
+                    let entity = cx.new(|cx| CsvrApp::new(data, window, cx));
                     let focus = entity.read(cx).focus_handle.clone();
                     window.focus(&focus, cx);
                     entity

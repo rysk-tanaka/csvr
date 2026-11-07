@@ -79,7 +79,7 @@ pub(crate) fn run() {
 
         let sample = CsvData::from_reader(SAMPLE_CSV.as_bytes()).expect("the sample CSV is valid");
         let window = cx.open_window(WindowOptions::default(), |window, cx| {
-            let entity = cx.new(|cx| CsvrApp::new(sample, cx));
+            let entity = cx.new(|cx| CsvrApp::new(sample, window, cx));
             let focus = entity.read(cx).focus_handle.clone();
             window.focus(&focus, cx);
             entity
@@ -132,6 +132,15 @@ async fn load_japanese_font(cx: &mut AsyncApp) {
         if let Err(e) = cx.text_system().add_fonts(fonts) {
             log::error!("failed to add IBM Plex Sans JP: {e:#}");
             return;
+        }
+        // The column widths were measured with the missing glyphs' width.
+        for window in cx.windows() {
+            let Some(window) = window.downcast::<CsvrApp>() else {
+                continue;
+            };
+            if let Err(e) = window.update(cx, |app, window, _| app.remeasure_columns(window)) {
+                log::error!("failed to measure the columns again: {e:#}");
+            }
         }
         // Text already on screen keeps its old layout until it is drawn again.
         cx.refresh_windows();
@@ -226,7 +235,7 @@ fn listen_for_drops(window: WindowHandle<CsvrApp>, cx: AsyncApp) {
                     }
                 };
                 let replaced = window.update(&mut cx, |app, window, cx| {
-                    *app = CsvrApp::new(data, cx);
+                    *app = CsvrApp::new(data, window, cx);
                     window.focus(&app.focus_handle, cx);
                     cx.notify();
                 });

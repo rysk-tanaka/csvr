@@ -2,47 +2,129 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use regex::{Regex, RegexBuilder};
-use unicode_width::UnicodeWidthStr;
 
-use crate::data::{ChartAxes, ChartAxis, ChartType, CsvData, Row, SortDirection, Table};
+use crate::data::{ChartAxes, ChartAxis, ChartType, Row, SortDirection, Table};
 
-/// Pixel width per halfwidth character (monospace approximation at text_sm)
-pub(crate) const CHAR_WIDTH: f32 = 7.5;
 pub(crate) const MIN_COL_WIDTH: f32 = 50.0;
 pub(crate) const MAX_COL_WIDTH: f32 = 400.0;
 pub(crate) const COL_PADDING: f32 = 24.0;
 pub(crate) const ROW_NUM_WIDTH: f32 = 16.0;
+/// Rows the column widths look at. Shaping every cell of a large file would hold up opening it.
+const WIDTH_SAMPLE_ROWS: usize = 100;
+/// A line at least this wide makes its column `MAX_COL_WIDTH` wide.
+const WIDEST_MEASURED_LINE: f32 = MAX_COL_WIDTH - COL_PADDING;
 
-pub fn compute_column_widths(data: &CsvData) -> Vec<f32> {
-    let sample_count = data.rows.row_count().min(100);
-    data.headers
+/// Column widths from the widest line of each header and of its first rows. The app measures
+/// each line with the font it draws with: `cell_width` for cells and `header_width` for headers,
+/// the latter including the sort indicator. Both get a limit as well: a line at least that wide
+/// makes the column as wide as it gets, so they may stop measuring there and return any width
+/// at or above it. Long values are common in the first rows (JSON, Base64, prose), and the
+/// column only shows the start of them.
+pub fn compute_column_widths(
+    rows: &Table,
+    headers: &[impl AsRef<str>],
+    mut cell_width: impl FnMut(&str, f32) -> f32,
+    mut header_width: impl FnMut(&str, f32) -> f32,
+) -> Vec<f32> {
+    let sample_count = rows.row_count().min(WIDTH_SAMPLE_ROWS);
+    // Category columns repeat the same values, and shaping is the slow part. The keys borrow
+    // from `rows`, so no line is copied.
+    let mut measured: HashMap<&str, f32> = HashMap::new();
+    headers
         .iter()
         .enumerate()
         .map(|(col_idx, header)| {
-            // Fullwidth glyphs are about 14px, so counting them as one character cuts them off.
-            // `width_cjk` also counts East Asian Ambiguous symbols (① ※ ★) as 2, because the
-            // Japanese font draws them fullwidth. Ambiguous letters such as Greek stay at 1:
-            // the Latin fonts (the system font natively, IBM Plex Sans in the browser) have them.
-            // Ambiguous symbols those fonts also have count as 2 too. — … → are about 11px in
-            // IBM Plex Sans, between 1 and 2, but – € ° × are about 8px or less, so they widen the
-            // column a little. That is better than cutting ① off.
-            let max_columns = (0..sample_count)
-                .map(|r| {
-                    data.rows
-                        .cell(r, col_idx)
-                        .map_or(0, |cell| cell.width_cjk())
+            let header_widest = lines(header.as_ref())
+                .map(|line| header_width(line, WIDEST_MEASURED_LINE))
+                .fold(0.0, f32::max);
+            let cell_widest = (0..sample_count)
+                .filter_map(|r| rows.cell(r, col_idx))
+                .flat_map(lines)
+                .map(|line| {
+                    *measured
+                        .entry(line)
+                        .or_insert_with(|| cell_width(line, WIDEST_MEASURED_LINE))
                 })
-                .max()
-                .unwrap_or(0)
-                .max(header.to_uppercase().width_cjk());
-            (max_columns as f32 * CHAR_WIDTH + COL_PADDING).clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
+                .fold(0.0, f32::max);
+            (header_widest.max(cell_widest) + COL_PADDING).clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
         })
         .collect()
 }
 
-pub fn row_number_col_width(total_rows: usize) -> f32 {
+/// GPUI draws each line of a value on its own line even with `whitespace_nowrap`, so a value is
+/// as wide as its widest line.
+fn lines(text: &str) -> impl Iterator<Item = &str> {
+    text.split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line))
+}
+
+/// Whether the app may measure a line from its characters and adjacent pairs instead of shaping
+/// it whole (see `LineMeasure` in the app). Only characters that shaping does not join with
+/// their neighbors qualify: Latin, symbols, kanji, kana, and fullwidth and halfwidth forms of
+/// letters. A line with any other character is shaped whole, because the result is not decided
+/// by pairs: a VS16 such as ©️ draws the character before as an emoji (about twice as wide), a
+/// ZWJ sequence draws as one emoji, combining marks draw on the letter before, and scripts such
+/// as Arabic change shape by context. CJK punctuation (、。「」（）) is shaped whole too: CoreText spaces it by what
+/// surrounds it, so a pair measured alone can differ from the same pair in a line (by 28px over
+/// one line of Japanese prose), and measuring every pair with it is slower than shaping the
+/// lines whole. So is Hangul: next to kanji and kana it changed the width of the line by up to
+/// 10px more than its pairs did.
+pub fn measurable_by_pairs(line: &str) -> bool {
+    line.chars().all(|c| {
+        matches!(c,
+            ' '..='~'
+            // Latin-1 and Latin Extended, without the soft hyphen, which is invisible.
+            | '\u{A0}'..='\u{AC}'
+            | '\u{AE}'..='\u{24F}'
+            // General Punctuation, without the spaces, the line and paragraph separators, and
+            // the zero-width, bidi and invisible characters (U+2000-200F, U+2028-202F,
+            // U+205F-206F).
+            | '\u{2010}'..='\u{2027}'
+            | '\u{2030}'..='\u{205E}'
+            // Currency signs, then letterlike symbols to Miscellaneous Symbols and Arrows
+            // (arrows, math, box drawing, shapes, ①, ★).
+            | '\u{20A0}'..='\u{20C0}'
+            | '\u{2100}'..='\u{2BFF}'
+            // Fullwidth digits and Latin letters, and halfwidth katakana. CoreText spaces some
+            // of them from kanji and kana (halfwidth katakana by 1.75px, as it does Latin), so
+            // their pairs are shaped.
+            | '\u{FF10}'..='\u{FF19}'
+            | '\u{FF21}'..='\u{FF3A}'
+            | '\u{FF41}'..='\u{FF5A}'
+            | '\u{FF66}'..='\u{FF9F}'
+        ) || is_cjk_letter(c)
+    })
+}
+
+/// Whether the app has to shape a pair of adjacent characters to find how much setting them
+/// side by side changes the width. In CoreText kanji and kana keep their widths next to each other,
+/// so those pairs are not shaped; a font that kerns them only narrows them, so the column is at
+/// most a little wide. Skipping them matters because Japanese text has so many distinct pairs
+/// that shaping each would be slower than shaping the lines whole. Pairs with any other
+/// character are shaped (kerning, and the space CoreText adds between CJK and Latin).
+pub fn pair_needs_shaping(a: char, b: char) -> bool {
+    !(is_cjk_letter(a) && is_cjk_letter(b))
+}
+
+/// Kanji and kana, whose pairs CoreText sets without adjusting.
+fn is_cjk_letter(c: char) -> bool {
+    matches!(c,
+        // 々 〆 〇
+        '\u{3005}'..='\u{3007}'
+        // Hiragana and katakana with their iteration and prolonged sound marks, without the
+        // combining marks, ゠ and ・.
+        | '\u{3041}'..='\u{3096}'
+        | '\u{309D}'..='\u{309F}'
+        | '\u{30A1}'..='\u{30FA}'
+        | '\u{30FC}'..='\u{30FF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}')
+}
+
+/// `digit_width` is the width of the widest digit in the row number font.
+pub fn row_number_col_width(total_rows: usize, digit_width: f32) -> f32 {
     let digits = total_rows.max(1).ilog10() as usize + 1;
-    (digits as f32 * CHAR_WIDTH + ROW_NUM_WIDTH).max(40.0)
+    (digits as f32 * digit_width + ROW_NUM_WIDTH).max(40.0)
 }
 
 /// The list clamps its scroll offset only during prepaint, after the header has been built,
@@ -1011,10 +1093,43 @@ mod tests {
 
     // --- compute_column_widths ---
 
+    /// Stands in for the font: every character is as wide as a halfwidth one at `text_sm`.
+    const FAKE_CHAR_WIDTH: f32 = 7.5;
+
+    fn fake_width(text: &str, _limit: f32) -> f32 {
+        text.chars().count() as f32 * FAKE_CHAR_WIDTH
+    }
+
+    fn widths_of(data: &CsvData) -> Vec<f32> {
+        compute_column_widths(&data.rows, &data.headers, fake_width, fake_width)
+    }
+
+    #[test]
+    fn column_widths_let_measuring_stop_at_widest_line() {
+        let data = make_csv_data(&["a"], &[&["b"]]);
+        let mut cell_limits = Vec::new();
+        let mut header_limits = Vec::new();
+        let widths = compute_column_widths(
+            &data.rows,
+            &data.headers,
+            |_, limit| {
+                cell_limits.push(limit);
+                limit
+            },
+            |_, limit| {
+                header_limits.push(limit);
+                0.0
+            },
+        );
+        assert_eq!(cell_limits, [WIDEST_MEASURED_LINE]);
+        assert_eq!(header_limits, [WIDEST_MEASURED_LINE]);
+        assert!((widths[0] - MAX_COL_WIDTH).abs() < 0.01);
+    }
+
     #[test]
     fn column_widths_basic() {
         let data = make_csv_data(&["name", "age"], &[&["Alice", "30"], &["Bob", "25"]]);
-        let widths = compute_column_widths(&data);
+        let widths = widths_of(&data);
         assert_eq!(widths.len(), 2);
         assert!((widths[0] - 61.5).abs() < 0.01);
         assert!((widths[1] - MIN_COL_WIDTH).abs() < 0.01);
@@ -1024,22 +1139,39 @@ mod tests {
     fn column_widths_clamp_to_max() {
         let long_value = "x".repeat(100);
         let data = make_csv_data(&["col"], &[&[&long_value]]);
-        let widths = compute_column_widths(&data);
+        let widths = widths_of(&data);
         assert!((widths[0] - MAX_COL_WIDTH).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_clamp_to_min() {
+        let data = make_csv_data(&["a"], &[&["b"]]);
+        let widths = widths_of(&data);
+        assert!((widths[0] - MIN_COL_WIDTH).abs() < 0.01);
     }
 
     #[test]
     fn column_widths_empty_rows() {
         let data = make_csv_data(&["name", "age"], &[]);
-        let widths = compute_column_widths(&data);
+        let widths = widths_of(&data);
         assert!((widths[0] - 54.0).abs() < 0.01);
     }
 
     #[test]
     fn column_widths_header_longer_than_data() {
         let data = make_csv_data(&["description"], &[&["hi"]]);
-        let widths = compute_column_widths(&data);
+        let widths = widths_of(&data);
         assert!((widths[0] - 106.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_use_header_measure_for_headers() {
+        // The app's header measure adds the sort indicator; cells must not get it.
+        let data = make_csv_data(&["ab"], &[&["abcd"]]);
+        let widths = compute_column_widths(&data.rows, &data.headers, fake_width, |h, limit| {
+            fake_width(h, limit) + 50.0
+        });
+        assert!((widths[0] - (2.0 * FAKE_CHAR_WIDTH + 50.0 + COL_PADDING)).abs() < 0.01);
     }
 
     #[test]
@@ -1062,94 +1194,160 @@ mod tests {
     #[test]
     fn column_widths_short_rows() {
         let data = make_csv_data(&["a", "b", "c"], &[&["x", "y"]]);
-        let widths = compute_column_widths(&data);
+        let widths = widths_of(&data);
         assert_eq!(widths.len(), 3);
         assert!((widths[2] - MIN_COL_WIDTH).abs() < 0.01);
     }
 
     #[test]
-    fn column_widths_fullwidth_counts_as_two() {
-        let data = make_csv_data(&["品名"], &[&["ＡＢＣ"]]);
-        let widths = compute_column_widths(&data);
-        assert!((widths[0] - (6.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    fn column_widths_take_widest_line_of_cell() {
+        let data = make_csv_data(&["a"], &[&["abcdef\nabcdefgh\nab"]]);
+        let widths = widths_of(&data);
+        assert!((widths[0] - (8.0 * FAKE_CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
     }
 
     #[test]
-    fn column_widths_halfwidth_kana_counts_as_one() {
-        let kana = make_csv_data(&["a"], &[&["ｱｲｳｴｵｶｷｸ"]]);
-        let ascii = make_csv_data(&["a"], &[&["abcdefgh"]]);
-        let kana_width = compute_column_widths(&kana)[0];
-        assert!((kana_width - compute_column_widths(&ascii)[0]).abs() < 0.01);
-        assert!((kana_width - (8.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    fn column_widths_ignore_carriage_return() {
+        let data = make_csv_data(&["a"], &[&["abcdefgh\r\nab"]]);
+        let widths = widths_of(&data);
+        assert!((widths[0] - (8.0 * FAKE_CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
     }
 
     #[test]
-    fn column_widths_ambiguous_symbols_count_as_two() {
-        let data = make_csv_data(&["a"], &[&["①※"]]);
-        let widths = compute_column_widths(&data);
-        assert!((widths[0] - (4.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    fn column_widths_take_widest_line_of_header() {
+        let data = make_csv_data(&["abcdef\r\nabcdefgh\nab"], &[&["x"]]);
+        let widths = widths_of(&data);
+        assert!((widths[0] - (8.0 * FAKE_CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
     }
 
     #[test]
-    fn column_widths_greek_counts_as_one() {
-        // Greek is East Asian Ambiguous, but the Latin fonts draw it halfwidth.
-        let data = make_csv_data(&["a"], &[&["αβγδεζηθ"]]);
-        let widths = compute_column_widths(&data);
-        assert!((widths[0] - (8.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    fn column_widths_measure_each_line_once() {
+        let data = make_csv_data(
+            &["a", "b"],
+            &[&["same", "same"], &["same", "other"], &["same\nother", "x"]],
+        );
+        let mut measured = Vec::new();
+        compute_column_widths(
+            &data.rows,
+            &data.headers,
+            |line, limit| {
+                measured.push(line.to_string());
+                fake_width(line, limit)
+            },
+            fake_width,
+        );
+        measured.sort();
+        assert_eq!(measured, ["other", "same", "x"]);
     }
 
     #[test]
-    fn column_widths_latin_ambiguous_symbols_count_as_two() {
-        // Records a known limitation: the Latin fonts draw – € × about as wide as a letter, but
-        // they are Ambiguous symbols, so they count as 2.
-        let data = make_csv_data(&["a"], &[&["a–b€c×d"]]);
-        let widths = compute_column_widths(&data);
-        assert!((widths[0] - (10.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    fn column_widths_only_measure_first_rows() {
+        let mut rows: Vec<Vec<&str>> = vec![vec!["x"]; WIDTH_SAMPLE_ROWS];
+        let long_value = "y".repeat(30);
+        rows.push(vec![&long_value]);
+        let rows: Vec<&[&str]> = rows.iter().map(Vec::as_slice).collect();
+        let data = make_csv_data(&["a"], &rows);
+        let mut measured = Vec::new();
+        let widths = compute_column_widths(
+            &data.rows,
+            &data.headers,
+            |line, limit| {
+                measured.push(line.to_string());
+                fake_width(line, limit)
+            },
+            fake_width,
+        );
+        assert_eq!(measured, ["x"]);
+        assert!((widths[0] - MIN_COL_WIDTH).abs() < 0.01);
+    }
+
+    // --- measurable_by_pairs ---
+
+    #[test]
+    fn measurable_by_pairs_for_plain_text() {
+        assert!(measurable_by_pairs(""));
+        assert!(measurable_by_pairs("It’s “great” — €1,200 × 2…"));
+        assert!(measurable_by_pairs("café ñ"));
+        assert!(measurable_by_pairs("品名ＡＢＣ①※★ ｶﾞ が"));
+        assert!(measurable_by_pairs("ＡＢＣ１２３"));
     }
 
     #[test]
-    fn column_widths_fullwidth_header_longer_than_data() {
-        let data = make_csv_data(&["品名区分備考"], &[&["x"]]);
-        let widths = compute_column_widths(&data);
-        assert!((widths[0] - (12.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    fn measurable_by_pairs_not_for_joined_sequences() {
+        assert!(!measurable_by_pairs("©\u{FE0F}"));
+        assert!(!measurable_by_pairs("👨\u{200D}👩\u{200D}👧"));
+        assert!(!measurable_by_pairs("e\u{301}"));
+        assert!(!measurable_by_pairs("か\u{3099}"));
+        assert!(!measurable_by_pairs("مرحبا"));
+        assert!(!measurable_by_pairs("a\u{AD}b"));
+        assert!(!measurable_by_pairs("a\tb"));
+        assert!(!measurable_by_pairs("品名（ＡＢＣ）"));
+        assert!(!measurable_by_pairs("はい、そうです。"));
+        assert!(!measurable_by_pairs("한국어"));
+    }
+
+    // --- pair_needs_shaping ---
+
+    #[test]
+    fn pair_needs_shaping_skips_cjk_letters() {
+        for pair in ["日本", "テス", "ひら", "日テ", "々日", "ー日"] {
+            let mut chars = pair.chars();
+            let (a, b) = (chars.next().unwrap(), chars.next().unwrap());
+            assert!(!pair_needs_shaping(a, b), "{pair}");
+        }
+    }
+
+    #[test]
+    fn pair_needs_shaping_for_latin() {
+        for pair in ["AV", "a日", "日a", "a ", "ＡＢ", "日１", "ﾃｽ", "日ｶ"] {
+            let mut chars = pair.chars();
+            let (a, b) = (chars.next().unwrap(), chars.next().unwrap());
+            assert!(pair_needs_shaping(a, b), "{pair}");
+        }
     }
 
     // --- row_number_col_width ---
 
     #[test]
     fn row_num_width_zero_rows() {
-        let w = row_number_col_width(0);
+        let w = row_number_col_width(0, FAKE_CHAR_WIDTH);
         assert!((w - 40.0).abs() < 0.01);
     }
 
     #[test]
     fn row_num_width_single_digit() {
-        let w = row_number_col_width(9);
+        let w = row_number_col_width(9, FAKE_CHAR_WIDTH);
         assert!((w - 40.0).abs() < 0.01);
     }
 
     #[test]
     fn row_num_width_boundary_ten() {
-        let w = row_number_col_width(10);
+        let w = row_number_col_width(10, FAKE_CHAR_WIDTH);
         assert!((w - 40.0).abs() < 0.01);
     }
 
     #[test]
     fn row_num_width_two_digits() {
-        let w = row_number_col_width(99);
+        let w = row_number_col_width(99, FAKE_CHAR_WIDTH);
         assert!((w - 40.0).abs() < 0.01);
     }
 
     #[test]
     fn row_num_width_four_digits() {
-        let w = row_number_col_width(9999);
+        let w = row_number_col_width(9999, FAKE_CHAR_WIDTH);
         assert!((w - 46.0).abs() < 0.01);
     }
 
     #[test]
     fn row_num_width_large() {
-        let w = row_number_col_width(1_000_000);
+        let w = row_number_col_width(1_000_000, FAKE_CHAR_WIDTH);
         assert!((w - 68.5).abs() < 0.01);
+    }
+
+    #[test]
+    fn row_num_width_follows_digit_width() {
+        let w = row_number_col_width(1_000_000, 10.0);
+        assert!((w - (7.0 * 10.0 + ROW_NUM_WIDTH)).abs() < 0.01);
     }
 
     // --- RowFilter: `/` search ---

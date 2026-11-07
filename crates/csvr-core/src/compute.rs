@@ -23,6 +23,8 @@ pub fn compute_column_widths(data: &CsvData) -> Vec<f32> {
             // `width_cjk` also counts East Asian Ambiguous symbols (① ※ ★) as 2, because the
             // Japanese font draws them fullwidth. Ambiguous letters such as Greek stay at 1:
             // the Latin fonts (the system font natively, IBM Plex Sans in the browser) have them.
+            // Ambiguous symbols those fonts also have (— … € ° ×) count as 2 and widen the column
+            // a little, which is better than cutting ① off.
             let max_columns = (0..sample_count)
                 .map(|r| {
                     data.rows
@@ -1093,6 +1095,14 @@ mod tests {
         let data = make_csv_data(&["a"], &[&["αβγδεζηθ"]]);
         let widths = compute_column_widths(&data);
         assert!((widths[0] - (8.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_latin_ambiguous_symbols_count_as_two() {
+        // The Latin fonts draw these halfwidth, but they are Ambiguous symbols, so they count as 2.
+        let data = make_csv_data(&["a"], &[&["a—b…c€d"]]);
+        let widths = compute_column_widths(&data);
+        assert!((widths[0] - (10.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
     }
 
     #[test]

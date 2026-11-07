@@ -11,7 +11,8 @@ regex.workspace = true
 chardetng = "1.0.0"
 encoding_rs = "0.8.35"
 calamine = { version = "0.38.0", features = ["dates"] }
-# Counts fullwidth characters as 2 for column widths. Already in the tree through codespan-reporting.
+# Counts fullwidth characters as 2 for column widths. The browser build already pulls it in through
+# naga's codespan-reporting.
 unicode-width = "0.2.3"
 
 [dev-dependencies]

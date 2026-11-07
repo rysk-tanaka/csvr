@@ -28,16 +28,18 @@ sri_sha384() {
 
 # The file names and hashes come from `IBM_PLEX_SANS_JP` in src/web.rs, so the files here are the
 # ones the app asks for and the browser accepts. Each `url: "fonts/<name>"` line there is followed
-# by its `integrity: "sha384-..."` line. Prints "<name> <integrity>" per font.
+# by its `integrity: "sha384-..."` line. Only lines that start with the field name count, so doc
+# comments that quote these fields (`/// ...`) are skipped. Prints "<name> <integrity>" per font.
 font_list() {
   awk '
-    /url: "fonts\// { match($0, /fonts\/[^"]+/); name = substr($0, RSTART + 6, RLENGTH - 6); next }
-    /integrity: "sha384-/ && name != "" { match($0, /sha384-[^"]+/); print name, substr($0, RSTART, RLENGTH); name = "" }
+    /^[[:space:]]*url: "fonts\// { match($0, /fonts\/[^"]+/); name = substr($0, RSTART + 6, RLENGTH - 6); next }
+    /^[[:space:]]*integrity: "sha384-/ && name != "" { match($0, /sha384-[^"]+/); print name, substr($0, RSTART, RLENGTH); name = "" }
   ' src/web.rs
 }
 
 # Downloads a font into the cache unless the cached copy already has the expected hash. Returns 1
 # when the download fails; a wrong hash always stops the build, since then the code is wrong.
+# It runs as an `if` condition, where `set -e` does not apply, so each step checks for itself.
 fetch_font() {
   name=$1
   integrity=$2
@@ -45,7 +47,10 @@ fetch_font() {
   if [ -f "$cached" ] && [ "$(sri_sha384 "$cached")" = "$integrity" ]; then
     return 0
   fi
-  mkdir -p "$FONT_CACHE_DIR"
+  if ! mkdir -p "$FONT_CACHE_DIR"; then
+    echo "error: could not create $FONT_CACHE_DIR" >&2
+    exit 1
+  fi
   download="$cached.download"
   if ! curl --fail --silent --show-error --location --retry 3 --output "$download" "$FONT_BASE_URL/$name"; then
     rm -f "$download"
@@ -57,7 +62,10 @@ fetch_font() {
     echo "error: $FONT_BASE_URL/$name has $actual, but src/web.rs expects $integrity" >&2
     exit 1
   fi
-  mv "$download" "$cached"
+  if ! mv "$download" "$cached"; then
+    echo "error: could not move $download to $cached" >&2
+    exit 1
+  fi
 }
 
 fonts=$(font_list)
@@ -91,5 +99,8 @@ cp assets/LICENSE "$TRUNK_STAGING_DIR/licenses/icon-LICENSE.txt"
 # Trunk keeps its lock file in the output directory; wrangler would otherwise publish it.
 printf '.trunk-lock\n' > "$TRUNK_STAGING_DIR/.assetsignore"
 
-# Last, because it hashes the inline code of every HTML file, the licenses page included.
-node scripts/web-headers.mjs "$TRUNK_STAGING_DIR"
+# Only Cloudflare reads `_headers`, and only release builds are deployed, so `trunk serve` does not
+# need Node. Last, because it hashes the inline code of every HTML file, the licenses page included.
+if [ "$is_release" = true ]; then
+  node scripts/web-headers.mjs "$TRUNK_STAGING_DIR"
+fi

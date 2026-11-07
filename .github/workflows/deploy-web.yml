@@ -80,11 +80,13 @@ jobs:
           echo "$RUNNER_TEMP/trunk" >> "$GITHUB_PATH"
       # The post_build hook (scripts/web-assets.sh) adds the font, the licenses and `_headers`.
       - run: trunk build --release --locked
-      # Hidden files (Trunk's .trunk-lock) are left out by default.
+      # With hidden files, so wrangler gets .assetsignore and the deploy publishes what a local
+      # `wrangler deploy` would. .assetsignore keeps Trunk's .trunk-lock out.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: web-dist
           path: web/dist
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
 

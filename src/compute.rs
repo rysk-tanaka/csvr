@@ -95,23 +95,26 @@ pub(crate) struct RowFilter {
 }
 
 impl RowFilter {
-    /// Returns the filter and whether `pattern` is an invalid regex. An invalid pattern is
-    /// ignored so that the `/` search still narrows the rows.
-    pub(crate) fn new(query: &str, pattern: &str, target_col: Option<usize>) -> (Self, bool) {
+    /// An invalid `pattern` is ignored so that the `/` search still narrows the rows; check it
+    /// with `is_valid_pattern` to show the error.
+    pub(crate) fn new(query: &str, pattern: &str, target_col: Option<usize>) -> Self {
         let query_lower = (!query.is_empty()).then(|| query.to_lowercase());
-        if pattern.is_empty() {
-            return (
-                Self {
-                    query_lower,
-                    regex: None,
-                },
-                false,
-            );
-        }
-        let compiled = RegexBuilder::new(pattern).case_insensitive(true).build();
-        let has_error = compiled.is_err();
-        let regex = compiled.ok().map(|re| (re, target_col));
-        (Self { query_lower, regex }, has_error)
+        let regex = if pattern.is_empty() {
+            None
+        } else {
+            Self::build_regex(pattern).ok().map(|re| (re, target_col))
+        };
+        Self { query_lower, regex }
+    }
+
+    /// Whether the `&` filter accepts `pattern`. An empty pattern is valid and filters nothing.
+    pub(crate) fn is_valid_pattern(pattern: &str) -> bool {
+        pattern.is_empty() || Self::build_regex(pattern).is_ok()
+    }
+
+    /// The one place the `&` regex options are set, so validation and filtering agree.
+    fn build_regex(pattern: &str) -> Result<Regex, regex::Error> {
+        RegexBuilder::new(pattern).case_insensitive(true).build()
     }
 
     /// The two conditions are checked separately, so they may hold in different cells.
@@ -831,7 +834,8 @@ mod tests {
         pattern: &str,
         target_col: Option<usize>,
     ) -> (Vec<usize>, bool) {
-        let (filter, has_error) = RowFilter::new(query, pattern, target_col);
+        let filter = RowFilter::new(query, pattern, target_col);
+        let has_error = !RowFilter::is_valid_pattern(pattern);
         let mut out = Vec::new();
         filter.filter_range(rows, 0..rows.len(), &mut out);
         (out, has_error)
@@ -918,7 +922,7 @@ mod tests {
             &["a6"],
             &["a7"],
         ]);
-        let (filter, _) = RowFilter::new("a", "", None);
+        let filter = RowFilter::new("a", "", None);
         let mut chunked = Vec::new();
         for start in (0..rows.len()).step_by(3) {
             filter.filter_range(&rows, start..start + 3, &mut chunked);
@@ -929,7 +933,7 @@ mod tests {
     #[test]
     fn row_filter_range_beyond_rows_is_clamped() {
         let rows = make_rows(&[&["a"], &["a"]]);
-        let (filter, _) = RowFilter::new("a", "", None);
+        let filter = RowFilter::new("a", "", None);
         let mut out = Vec::new();
         filter.filter_range(&rows, 1..10, &mut out);
         filter.filter_range(&rows, 5..10, &mut out);

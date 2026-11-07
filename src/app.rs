@@ -91,12 +91,20 @@ impl Anchoring {
     }
 }
 
+/// Decided when a task starts, so the result is shown the way it was requested even if the
+/// view changes meanwhile.
+enum ScrollTarget {
+    /// After a sort, since the old position means nothing in the new order.
+    Top,
+    Keep(Anchoring),
+}
+
 struct FilterResult {
     indices: Vec<usize>,
-    row_filter_error: bool,
+    /// Whether the rows were filtered again, rather than only the shown rows reordered.
+    is_refiltered: bool,
     snapshot: FilterSnapshot,
-    /// `None` when the request included a sort, which scrolls to the top instead.
-    anchoring: Option<Anchoring>,
+    scroll: ScrollTarget,
 }
 
 #[derive(IntoElement)]
@@ -256,6 +264,9 @@ pub(crate) struct CsvrApp {
     /// Set by a sort. The result then scrolls to the top instead of keeping the position, even
     /// if typing replaces the task before it finishes.
     pending_scroll_to_top: bool,
+    /// Set when a `/` or `&` query changes, until a filtered result is shown. While it is clear,
+    /// the shown rows match the queries, so a sort only needs to reorder them.
+    needs_refilter: bool,
     sort_state: Option<(usize, SortDirection)>,
     chart_active: bool,
     metadata_visible: bool,
@@ -349,6 +360,7 @@ impl CsvrApp {
             filtered_indices: Arc::new((0..total_rows).collect()),
             filter_task: None,
             pending_scroll_to_top: false,
+            needs_refilter: false,
             sort_state: None,
             chart_active: false,
             metadata_visible: has_metadata,
@@ -379,36 +391,61 @@ impl CsvrApp {
     /// consistent with what is on screen.
     fn recompute_filtered_indices(&mut self, cx: &mut Context<Self>) {
         let rows = self.rows.clone();
-        let query = self.search_query.clone();
-        let pattern = self.row_filter_pattern.clone();
-        let target_col = self.row_filter_col;
+        // A sort alone keeps the same rows, so the shown rows are reordered instead of filtered
+        // again. They are the full result for the current queries unless a query changed.
+        let filter = self.needs_refilter.then(|| {
+            RowFilter::new(
+                &self.search_query,
+                &self.row_filter_pattern,
+                self.row_filter_col,
+            )
+        });
+        let shown = self.filtered_indices.clone();
         let sort = self.sort_state.map(|(col, direction)| {
             let use_numeric = self.numeric_columns.get(col).copied().unwrap_or(false);
             (col, use_numeric, direction)
         });
         let snapshot = self.filter_snapshot();
-        let keeps_position = !self.pending_scroll_to_top;
+        let scrolls_to_top = self.pending_scroll_to_top;
         self.filter_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let (filter, row_filter_error) = RowFilter::new(&query, &pattern, target_col);
-                    let mut indices = Vec::new();
-                    for start in (0..rows.len()).step_by(FILTER_CHUNK_ROWS) {
-                        filter.filter_range(&rows, start..start + FILTER_CHUNK_ROWS, &mut indices);
-                        // Lets a replaced task stop here, and lets a single-threaded browser
-                        // build, which runs this on the UI thread, handle input in between.
-                        yield_now().await;
+                    let is_refiltered = filter.is_some();
+                    let mut indices = match filter {
+                        Some(filter) => {
+                            let mut indices = Vec::new();
+                            for start in (0..rows.len()).step_by(FILTER_CHUNK_ROWS) {
+                                let chunk = start..start + FILTER_CHUNK_ROWS;
+                                filter.filter_range(&rows, chunk, &mut indices);
+                                // Lets a replaced task stop here, and lets a single-threaded
+                                // browser build, which runs this on the UI thread, handle input
+                                // in between.
+                                yield_now().await;
+                            }
+                            indices
+                        }
+                        None => shown.to_vec(),
+                    };
+                    match sort {
+                        Some((col, use_numeric, direction)) => {
+                            indices = sort_indices(&rows, &indices, col, use_numeric, direction);
+                        }
+                        // Clearing a sort restores the file order, which filtering keeps.
+                        None if !is_refiltered => indices.sort_unstable(),
+                        None => {}
                     }
-                    if let Some((col, use_numeric, direction)) = sort {
-                        indices = sort_indices(&rows, &indices, col, use_numeric, direction);
-                    }
-                    let anchoring = keeps_position.then(|| Anchoring::compute(&snapshot, &indices));
+                    yield_now().await;
+                    let scroll = if scrolls_to_top {
+                        ScrollTarget::Top
+                    } else {
+                        ScrollTarget::Keep(Anchoring::compute(&snapshot, &indices))
+                    };
                     FilterResult {
                         indices,
-                        row_filter_error,
+                        is_refiltered,
                         snapshot,
-                        anchoring,
+                        scroll,
                     }
                 })
                 .await;
@@ -438,37 +475,39 @@ impl CsvrApp {
     /// Show a finished filter result, keeping the view on the same rows where possible
     /// (or scrolling to the top after a sort).
     fn apply_filter_result(&mut self, result: FilterResult, cx: &mut Context<Self>) {
+        let current = self.filter_snapshot();
+        let is_anchored_to_stale_view =
+            matches!(result.scroll, ScrollTarget::Keep(_)) && !result.snapshot.matches(&current);
+        if is_anchored_to_stale_view {
+            self.reanchor_filter_result(result, current, cx);
+            return;
+        }
         let FilterResult {
             indices,
-            row_filter_error,
-            snapshot,
-            anchoring,
+            is_refiltered,
+            scroll,
+            ..
         } = result;
-        let scrolls_to_top = std::mem::take(&mut self.pending_scroll_to_top);
-        let current = self.filter_snapshot();
-        // The task anchored to the view as it was when it started. If the user scrolled or
-        // changed the selection since then, anchor again to the view as it is now.
-        let anchoring = (!scrolls_to_top).then(|| match anchoring {
-            Some(anchoring) if snapshot.matches(&current) => anchoring,
-            _ => Anchoring::compute(&current, &indices),
-        });
         // Take the column from the current selection, which may have changed on the same row.
         let selected_col = self.selected_cell.map(|(_, col)| col);
 
+        self.pending_scroll_to_top = false;
+        if is_refiltered {
+            self.needs_refilter = false;
+        }
         self.rows_before_empty = None;
         self.filtered_indices = Arc::new(indices);
-        self.row_filter_error = row_filter_error;
         self.selected_cell = None;
         self.column_stats_cache = None;
 
-        match anchoring {
-            None => {
+        match scroll {
+            ScrollTarget::Top => {
                 self.scroll_handle
                     .scroll_to_item(0, gpui::ScrollStrategy::Top);
                 // The list only updates this when it renders, and another key can arrive before that.
                 self.visible_range = 0..self.visible_range.len();
             }
-            Some(anchoring) => {
+            ScrollTarget::Keep(anchoring) => {
                 if let (Some(pos), Some(col)) = (anchoring.selected_pos, selected_col) {
                     self.selected_cell = Some((pos, col));
                     self.recompute_column_stats();
@@ -489,14 +528,36 @@ impl CsvrApp {
         cx.notify();
     }
 
-    /// Re-filter after a `/` or `&` query change, keeping the view on the same rows where possible.
-    fn refilter_keeping_position(&mut self, cx: &mut Context<Self>) {
-        self.recompute_filtered_indices(cx);
+    /// The user scrolled or changed the selection while the task ran. Anchor again to the view
+    /// as it is now, off the UI thread like the first time, since this is most likely to happen
+    /// when filtering is slow.
+    fn reanchor_filter_result(
+        &mut self,
+        result: FilterResult,
+        snapshot: FilterSnapshot,
+        cx: &mut Context<Self>,
+    ) {
+        self.filter_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let anchoring = Anchoring::compute(&snapshot, &result.indices);
+                    FilterResult {
+                        snapshot,
+                        scroll: ScrollTarget::Keep(anchoring),
+                        ..result
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| this.apply_filter_result(result, cx))
+                .ok();
+        }));
     }
 
     fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
         self.search_query = query;
-        self.refilter_keeping_position(cx);
+        self.needs_refilter = true;
+        self.recompute_filtered_indices(cx);
     }
 
     fn toggle_sort(&mut self, col: usize, cx: &mut Context<Self>) {
@@ -867,14 +928,7 @@ impl CsvrApp {
         if self.row_filter_active {
             // Revalidate error flag without clearing selection or re-scanning rows.
             // Only check if the pattern compiles — no need to run it against all rows.
-            if !self.row_filter_pattern.is_empty() {
-                self.row_filter_error = RegexBuilder::new(&self.row_filter_pattern)
-                    .case_insensitive(true)
-                    .build()
-                    .is_err();
-            } else {
-                self.row_filter_error = false;
-            }
+            self.row_filter_error = !RowFilter::is_valid_pattern(&self.row_filter_pattern);
         }
     }
 
@@ -882,8 +936,12 @@ impl CsvrApp {
         let (col, pattern) = parse_column_filter(&query, &self.raw_headers);
         self.row_filter_query = query;
         self.row_filter_col = col;
+        // Checked here rather than with the result, so the error shows as soon as it is typed
+        // and a result landing after the bar closes cannot set it again.
+        self.row_filter_error = !RowFilter::is_valid_pattern(&pattern);
         self.row_filter_pattern = pattern;
-        self.refilter_keeping_position(cx);
+        self.needs_refilter = true;
+        self.recompute_filtered_indices(cx);
     }
 
     fn close_row_filter(&mut self) {

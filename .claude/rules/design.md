@@ -9,12 +9,11 @@ paths:
 
 `CsvrApp` の状態変更は専用メソッドに集約し、関連する副作用（フィルタ再計算、スクロールリセット等）の呼び忘れを防ぐ。
 
-- `set_search_query()` — クエリ変更 + `refilter_keeping_position`
-- `refilter_keeping_position()` — `/` と `&` の入力で `recompute_filtered_indices` に再計算を依頼する。表示位置と選択の維持は `apply_filter_result` が行う
+- `set_search_query()` — クエリ変更 + `needs_refilter` を立てて `recompute_filtered_indices` に依頼
 - `toggle_search()` / `close_search()` — 検索バーの表示切替。`close_search` はバーを閉じるがクエリを維持（全コマンド共通の Escape 挙動）
 - `toggle_sort(col)` — ソート状態サイクル（None → Asc → Desc → None）。`rows_before_empty` を消し、`pending_scroll_to_top` を立てて `recompute_filtered_indices` に依頼する
-- `recompute_filtered_indices()` — `/` フィルタと `&` 正規表現フィルタ（`RowFilter` で 1 回の走査）→ ソートを、`background_executor` のタスクで計算する。`filter_task` を置き換えると前のタスクは捨てられる。`FILTER_CHUNK_ROWS` 行ごとに `yield_now` で処理を譲るので、置き換えたタスクはすぐ止まり、シングルスレッドのブラウザ版でも入力が通る。計算中も表示・選択・統計・チャートは古い結果のまま（コピーやエクスポートが表示と食い違わない）。依頼の時点の表示（`FilterSnapshot`: 並び・先頭位置・選択した元の行）を渡し、ソートを含まない依頼では位置合わせ（`anchored_position` と選択した行の新しい位置）もタスクの中で計算する。並びは `Arc<Vec<usize>>` なのでコピーせずに渡せる
-- `apply_filter_result()` — タスクの結果を表示に反映する。選択と統計は必ず消してから戻す。`pending_scroll_to_top` が立っていれば先頭へスクロールし、選択は戻さず、0 件でも `rows_before_empty` を保存しない（ソートの直後に入力してタスクが置き換わっても同じ）。立っていなければ、画面先頭の行以降で最初に残った行を先頭に出す（なければ最後の行）。選択は行が残れば追従し、消えれば解除するだけで、スクロールはしない。GPUI は空のリストのオフセットを 0 に補正するので、0 件になる前の並びと先頭位置を `rows_before_empty` に保持する。`visible_range` は描画でしか更新されないので、次の入力に備えて新しい先頭位置に更新する。計算中にスクロールや選択の変更があってスナップショットと食い違えば、位置合わせは今の表示で計算し直す。選択を戻すときの列は適用の時点の選択から取る（同じ行で列を選び直しても残る）
+- `recompute_filtered_indices()` — `background_executor` のタスクで、`/` フィルタと `&` 正規表現フィルタ（`RowFilter` で 1 回の走査）→ ソートを計算する。`needs_refilter` が立っていなければ（ソートだけの変更）、表示中の行を並べ替えるだけにする（ソート解除は元の順に戻す）。`filter_task` を置き換えると前のタスクは捨てられる。`FILTER_CHUNK_ROWS` 行ごとと、ソートの後に `yield_now` で処理を譲るので、置き換えたタスクはそこで止まり、シングルスレッドのブラウザ版でも入力が通る（ソート自体は一括）。計算中も表示・選択・統計・チャートは古い結果のまま（コピーやエクスポートが表示と食い違わない）。依頼の時点の表示（`FilterSnapshot`: 並び・先頭位置・選択した元の行）を渡し、スクロールの扱い（`ScrollTarget`）もこの時点で決める。`pending_scroll_to_top` なら `Top`、そうでなければ位置合わせ（`anchored_position` と選択した行の新しい位置）もタスクの中で計算して `Keep` にする。並びは `Arc<Vec<usize>>` なのでコピーせずに渡せる
+- `apply_filter_result()` — タスクの結果を表示に反映する。`Keep` なのに計算中のスクロールや選択の変更でスナップショットと食い違えば、反映せずに `reanchor_filter_result` で位置合わせだけをバックグラウンドで計算し直す（遅いフィルタを待つ間にスクロールしやすいため、UI スレッドで全件を走査しない）。反映するときは選択と統計を必ず消してから戻し、`pending_scroll_to_top` を下ろし、フィルタし直した結果なら `needs_refilter` も下ろす。`Top` なら先頭へスクロールし、選択は戻さず、0 件でも `rows_before_empty` を保存しない（ソートの直後に入力してタスクが置き換わっても同じ）。`Keep` なら、画面先頭の行以降で最初に残った行を先頭に出す（なければ最後の行）。選択は行が残れば追従し、消えれば解除するだけで、スクロールはしない。選択を戻すときの列は適用の時点の選択から取る（同じ行で列を選び直しても残る）。GPUI は空のリストのオフセットを 0 に補正するので、0 件になる前の並びと先頭位置を `rows_before_empty` に保持する。`visible_range` は描画でしか更新されないので、次の入力に備えて新しい先頭位置に更新する
 - `select_cell(filtered_idx, col)` — セル選択。`col=None` で行全体選択
 - `clear_selection()` — 選択解除（Escape で呼ばれる）
 - `move_selection(row_delta, col_delta, viewport_width)` — 矢印キーによるカーソル移動 + `ensure_visible`（縦）と `ensure_col_visible`（横）で自動スクロール。上下キーでも選択中のセルが見えるように横へ動かす。固定列と行全体の選択では横に動かさない。列変更時のみ `recompute_column_stats` を呼ぶ（行のみ移動時はスキップ）
@@ -26,7 +25,7 @@ paths:
 - `recompute_column_stats()` — `column_stats_cache` を再計算。`select_cell` と、選択が残ったときの `apply_filter_result` から呼ばれる。`apply_filter_result` ではまずキャッシュを直接 `None` にクリアする
 - `toggle_col_filter()` / `set_col_filter_query()` / `close_col_filter()` — `*` コマンドによる列フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_visible_columns()` は呼ばない）
 - `toggle_pin_input()` / `confirm_pin_input()` / `cancel_pin_input()` — `f` コマンドによる列固定。空入力で Enter → `pinned_col_count = 0`（リセット）
-- `toggle_row_filter()` / `set_row_filter_query()` / `close_row_filter()` — `&` コマンドによる行の正規表現フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_filtered_indices()` は呼ばない）。`col:pattern` 構文で列指定可能。入力時は `refilter_keeping_position` で再計算を依頼し、`apply_filter_result` が表示位置を維持する
+- `toggle_row_filter()` / `set_row_filter_query()` / `close_row_filter()` — `&` コマンドによる行の正規表現フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_filtered_indices()` は呼ばない）。`col:pattern` 構文で列指定可能。入力時は `needs_refilter` を立てて `recompute_filtered_indices` に依頼し、`apply_filter_result` が表示位置を維持する。エラーフラグは結果を待たずに入力の時点で判定する（バーを閉じた後に結果が来ても立ち直らない）。正規表現の設定は `RowFilter::build_regex` の 1 か所で、検証（`RowFilter::is_valid_pattern`）とフィルタで食い違わない
 
 ## ステータスバー
 

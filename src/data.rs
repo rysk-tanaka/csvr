@@ -655,7 +655,8 @@ mod tests {
 
     #[test]
     fn parse_promotes_first_row_as_header() {
-        // The parsed header row is already the widest, so a 3-field majority promotes row 0.
+        // The first data row already has the dominant width, so it is promoted and only the
+        // parsed header goes to metadata.
         let input = "k\nh1,h2,h3\n1,2,3\n4,5,6\n";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
         assert_eq!(data.headers, vec!["h1", "h2", "h3"]);

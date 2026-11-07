@@ -70,7 +70,9 @@ enum ScrollTarget {
 /// What a filter task orders. Only the source it needs is moved into the task.
 enum RowSource {
     /// A query changed, so every row is checked again. The queries are kept as text so that
-    /// the regexes are built in the task rather than on the UI thread at every keystroke.
+    /// the `/` regex is built in the task rather than on the UI thread at every keystroke. The
+    /// `&` pattern is still compiled once on the UI thread by `is_valid_pattern`, to show its
+    /// error without waiting for the task.
     Filter {
         query: String,
         pattern: String,

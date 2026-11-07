@@ -69,8 +69,13 @@ enum ScrollTarget {
 
 /// What a filter task orders. Only the source it needs is moved into the task.
 enum RowSource {
-    /// A query changed, so every row is checked again.
-    Filter(RowFilter),
+    /// A query changed, so every row is checked again. The queries are kept as text so that
+    /// the regexes are built in the task rather than on the UI thread at every keystroke.
+    Filter {
+        query: String,
+        pattern: String,
+        target_col: Option<usize>,
+    },
     /// Only the sort changed, so the rows already shown are reordered.
     Reorder(Arc<Vec<usize>>),
 }
@@ -85,9 +90,8 @@ struct FilterResult {
 #[derive(IntoElement)]
 struct TableRow {
     ix: usize,
-    row_num: usize,
     rows: Arc<Table>,
-    /// Index of this row in `rows`, which is `row_num - 1`.
+    /// Index of this row in `rows`; the row number shown is one more.
     row: usize,
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
@@ -117,10 +121,11 @@ impl RenderOnce for TableRow {
         let pinned_count = self.pinned_col_count;
         let h_offset = self.h_offset;
 
+        let row = self.rows.row(self.row);
         let make_cell = |col_idx: usize, entity: Entity<CsvrApp>| {
             let width = self.col_widths.get(col_idx).copied().unwrap_or(0.0);
-            let text =
-                SharedString::from(self.rows.cell(self.row, col_idx).unwrap_or("").to_string());
+            let cell = row.and_then(|row| row.get(col_idx)).unwrap_or("");
+            let text = SharedString::from(cell.to_string());
             let is_cell_selected = matches!(selected_col, Some(Some(c)) if c == col_idx);
             div()
                 .id(SharedString::from(format!("cell-{}-{}", ix, col_idx)))
@@ -164,7 +169,7 @@ impl RenderOnce for TableRow {
                             cx.notify();
                         });
                     })
-                    .child(self.row_num.to_string())
+                    .child((self.row + 1).to_string())
             })
             .children(
                 self.visible_col_indices
@@ -372,11 +377,11 @@ impl CsvrApp {
         // A sort alone keeps the same rows, so the shown rows are reordered instead of filtered
         // again. They are the full result for the current queries unless a query changed.
         let source = if self.needs_refilter {
-            RowSource::Filter(RowFilter::new(
-                &self.search_query,
-                &self.row_filter_pattern,
-                self.row_filter_col,
-            ))
+            RowSource::Filter {
+                query: self.search_query.clone(),
+                pattern: self.row_filter_pattern.clone(),
+                target_col: self.row_filter_col,
+            }
         } else {
             RowSource::Reorder(self.filtered_indices.clone())
         };
@@ -389,9 +394,14 @@ impl CsvrApp {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let is_refiltered = matches!(source, RowSource::Filter(_));
+                    let is_refiltered = matches!(source, RowSource::Filter { .. });
                     let mut indices = match source {
-                        RowSource::Filter(filter) => {
+                        RowSource::Filter {
+                            query,
+                            pattern,
+                            target_col,
+                        } => {
+                            let filter = RowFilter::new(&query, &pattern, target_col);
                             let mut indices = Vec::new();
                             for start in (0..rows.row_count()).step_by(FILTER_CHUNK_ROWS) {
                                 let chunk = start..start + FILTER_CHUNK_ROWS;
@@ -1658,16 +1668,13 @@ impl Render for CsvrApp {
                             range
                                 .filter_map(|i| {
                                     let original_idx = *this.filtered_indices.get(i)?;
-                                    if original_idx >= this.rows.row_count() {
-                                        return None;
-                                    }
+                                    this.rows.row(original_idx)?;
                                     let selected_col =
                                         this.selected_cell.and_then(|(sel_row, col)| {
                                             if sel_row == i { Some(col) } else { None }
                                         });
                                     Some(TableRow {
                                         ix: i,
-                                        row_num: original_idx + 1,
                                         rows: this.rows.clone(),
                                         row: original_idx,
                                         col_widths: this.col_widths.clone(),

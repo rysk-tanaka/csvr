@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>csvr</title>
+    <link data-trunk rel="rust" href="../Cargo.toml" data-bin="csvr" data-bindgen-target="web" />
+    <style>
+      /* gpui_web appends a full-size canvas to <body>, so the page must not add margins or scroll. */
+      html,
+      body {
+        height: 100%;
+        margin: 0;
+        overflow: hidden;
+      }
+    </style>
+  </head>
+  <body></body>
+</html>

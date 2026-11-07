@@ -3,11 +3,11 @@ use std::{collections::HashMap, ops::Range, rc::Rc, sync::Arc, time::Duration};
 use futures_lite::future::yield_now;
 
 use gpui::{
-    App, Bounds, ClipboardItem, ContentMask, Context, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, Font, FontWeight, Hsla, KeyBinding, KeyDownEvent,
-    Keystroke, ListHorizontalSizingBehavior, Pixels, Rems, Render, SharedString, Task, TextAlign,
-    TextRun, UTF16Selection, UnderlineStyle, UniformListScrollHandle, Window, actions, canvas, div,
-    fill, point, prelude::*, px, rgb, uniform_list,
+    App, Bounds, ContentMask, Context, ElementInputHandler, Entity, EntityInputHandler,
+    FocusHandle, Focusable, Font, FontWeight, Hsla, KeyBinding, KeyDownEvent, Keystroke,
+    ListHorizontalSizingBehavior, Pixels, Rems, Render, SharedString, Task, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, UniformListScrollHandle, Window, actions, canvas, div, fill,
+    point, prelude::*, px, rgb, uniform_list,
 };
 use regex::RegexBuilder;
 
@@ -36,9 +36,18 @@ actions!(
         CopySelection,
         ExportJson,
         ExportMarkdown,
+        // Handled by the browser build (`web`), which binds it and opens a file picker.
+        OpenFile,
         Quit
     ]
 );
+
+/// The key context of the table view's bindings. None of them apply while the IME is
+/// composing. On the web, keys reach the app before the IME, so Escape or `cmd-f` would
+/// otherwise close the bar under the composition. The view sets `ime_editing` in its key
+/// context (see `render`), and GPUI redraws a changed view before it dispatches the next key,
+/// so the context is current.
+pub(crate) const KEY_CONTEXT: &str = "CsvrApp && !ime_editing";
 
 /// Modifier for the table view's shortcuts. The browser build binds both, because its `cmd`
 /// is the Meta key on every OS.
@@ -51,11 +60,7 @@ pub(crate) enum ShortcutModifier {
 
 /// Bindings without a modifier come once, however many modifiers are given.
 pub(crate) fn key_bindings(modifiers: &[ShortcutModifier]) -> Vec<KeyBinding> {
-    // None of the bindings apply while the IME is composing. On the web, keys reach the app
-    // before the IME, so Escape or `cmd-f` would otherwise close the bar under the composition.
-    // The view sets `ime_editing` in its key context (see `render`), and GPUI redraws a changed
-    // view before it dispatches the next key, so the context is current.
-    let context = Some("CsvrApp && !ime_editing");
+    let context = Some(KEY_CONTEXT);
     let mut bindings = vec![KeyBinding::new("escape", DismissSearch, context)];
     for modifier in modifiers {
         // `KeyBinding::new` takes `&'static str`, so the keystrokes are spelled out per modifier.
@@ -282,6 +287,9 @@ pub(crate) struct CsvrApp {
     status_message: Option<SharedString>,
     /// Replacing this cancels the previous timer, so a newer message keeps its full duration
     status_message_task: Option<Task<()>>,
+    /// The browser's clipboard write being waited on. A newer copy replaces it.
+    #[cfg(target_family = "wasm")]
+    clipboard_task: Option<Task<()>>,
     headers: Vec<SharedString>,
     /// Original headers (not uppercased) for regex matching and column filter parsing
     raw_headers: Vec<String>,
@@ -398,6 +406,8 @@ impl CsvrApp {
             load_warning,
             status_message: None,
             status_message_task: None,
+            #[cfg(target_family = "wasm")]
+            clipboard_task: None,
             headers,
             raw_headers,
             rows,
@@ -791,7 +801,7 @@ impl CsvrApp {
         self.set_h_scroll_offset(px(offset));
     }
 
-    fn copy_selection(&self, cx: &mut Context<Self>) {
+    fn copy_selection(&mut self, cx: &mut Context<Self>) {
         let Some((filtered_idx, col)) = self.selected_cell else {
             return;
         };
@@ -812,7 +822,41 @@ impl CsvrApp {
                 .join("\t"),
         };
 
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        self.write_clipboard(text, None, cx);
+    }
+
+    /// Writes `text` to the clipboard and then shows `copied_message`, if any. The browser can
+    /// refuse the write (see `browser::write_clipboard_text`), so the browser build waits for
+    /// the result and shows the failure instead.
+    fn write_clipboard(
+        &mut self,
+        text: String,
+        copied_message: Option<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
+        #[cfg(not(target_family = "wasm"))]
+        {
+            cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+            if let Some(message) = copied_message {
+                self.show_status_message(message, cx);
+            }
+        }
+        #[cfg(target_family = "wasm")]
+        {
+            let written = crate::browser::write_clipboard_text(&text);
+            self.clipboard_task = Some(cx.spawn(async move |this, cx| {
+                let result = written.await;
+                this.update(cx, |this, cx| match result {
+                    Ok(()) => {
+                        if let Some(message) = copied_message {
+                            this.show_status_message(message, cx);
+                        }
+                    }
+                    Err(e) => this.show_status_message(format!("Copy failed: {e}"), cx),
+                })
+                .ok();
+            }));
+        }
     }
 
     /// Exports would otherwise copy the rows from before the latest query, which the user is
@@ -859,8 +903,8 @@ impl CsvrApp {
             self.show_status_message("No data to export", cx);
             return;
         }
-        cx.write_to_clipboard(ClipboardItem::new_string(text));
-        self.show_status_message(copied_status_message(format_name, row_count), cx);
+        let message = copied_status_message(format_name, row_count);
+        self.write_clipboard(text, Some(message.into()), cx);
     }
 
     fn show_status_message(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
@@ -2125,6 +2169,26 @@ impl Render for CsvrApp {
                     .justify_between()
                     .text_xs()
                     .text_color(rgb(TEXT_SUBTEXT))
+                    // The browser build can open files only from the page: a drop, or this
+                    // button and `cmd-o`, which `web` handles.
+                    .when(cfg!(target_family = "wasm"), |el| {
+                        el.child(
+                            div()
+                                .id("open-file")
+                                .flex_shrink_0()
+                                .mr_2()
+                                .px_1()
+                                .rounded_sm()
+                                .bg(rgb(SEARCH_BG))
+                                .text_color(rgb(TEXT_MAIN))
+                                .cursor_pointer()
+                                .hover(|style| style.bg(rgb(SURFACE1)))
+                                .on_click(|_event, window, cx| {
+                                    window.dispatch_action(Box::new(OpenFile), cx);
+                                })
+                                .child("Open file"),
+                        )
+                    })
                     .child({
                         let vis_cols = self.visible_col_indices.len();
                         let total_cols = self.raw_headers.len();

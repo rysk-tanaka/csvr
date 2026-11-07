@@ -19,6 +19,8 @@ cargo build --release        # リリースビルド
 cargo tarpaulin --skip-clean --out stdout  # カバレッジ計測
 cargo check -p csvr-core --target wasm32-unknown-unknown  # コアの wasm32 ビルド確認（要: rustup target add）
 CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime cargo test -p csvr-core --target wasm32-wasip1  # コアのテストを wasm32 で実行（要: wasmtime）
+trunk serve                  # ブラウザ版（試作）を http://127.0.0.1:8080 で起動（要: brew install trunk。設定は Trunk.toml、出力は web/dist）
+cargo check --bin csvr --target wasm32-unknown-unknown  # ブラウザ版のビルド確認
 cargo update-licenses                # THIRD_PARTY_LICENSES.html 再生成（要: cargo-about）
 ./scripts/screenshot.sh              # README用スクリーンショット撮影（要: Accessibility許可 / 表示環境）
 ```
@@ -38,7 +40,7 @@ GPUI は Metal シェーダーをコンパイルするため、通常の Rust �
 cargo workspace の 2 クレート・4 モジュール構成。依存関係: `data`(基盤) ← `compute`, `chart` ← `app` ← `main`。循環依存なし。
 
 - `csvr-core`（`crates/csvr-core`）— `data` と `compute`。GPUI に依存せず、予定しているブラウザ版（gpui_web）と共有するため wasm32 でもビルドできるように保つ。ファイル・stderr・スレッドを使わない
-- `csvr`（ルートの `Cargo.toml`）— `main`・`app`・`chart`。GPUI を使うバイナリ。`csvr_core::data` / `csvr_core::compute` を参照する。ルートを bin パッケージのまま残しているのは、`cargo run`・`target/release/csvr`・リリースの version 読み取り（`auto-release.yml`）を変えないため
+- `csvr`（ルートの `Cargo.toml`）— `main`・`native`・`web`・`app`・`chart`。GPUI を使うバイナリ。wasm32 ではブラウザ版（試作）になり、`main` が `native::run` と `web::run` を切り替える。`csvr_core::data` / `csvr_core::compute` を参照する。ルートを bin パッケージのまま残しているのは、`cargo run`・`target/release/csvr`・リリースの version 読み取り（`auto-release.yml`）を変えないため
 
 ```text
 crates/csvr-core/src/
@@ -46,7 +48,9 @@ crates/csvr-core/src/
   data.rs      -- 型定義: CsvData, Table, ChartType, SortDirection, ChartData + テスト
   compute.rs   -- 純粋計算関数 + テスト
 src/
-  main.rs      -- エントリポイント（load_csv, set_dock_icon, main）
+  main.rs      -- エントリポイント（native / web の run を呼ぶだけ）
+  native.rs    -- ネイティブ版（load_csv, set_dock_icon, run）
+  web.rs       -- ブラウザ版（フォントの読み込み、サンプル CSV、ドロップされたファイルの読み込み）
   chart.rs     -- draw_chart + チャートカラー定数
   app.rs       -- CsvrApp, TableRow, UIカラー定数, actions!
 ```
@@ -57,6 +61,8 @@ src/
 4. **UI 層** (`app.rs`) — `CsvrApp`（`Render` トレイト実装）がメインビュー。`TableRow`（`RenderOnce` / `IntoElement`）が個別行。本体は `uniform_list` による仮想スクロール。カラーテーマは Catppuccin Mocha（`BG_BASE`, `TEXT_MAIN` 等の定数で管理）。`/`（検索）・`*`（列フィルタ）・`f`（列固定）・`&`（行フィルタ）の入力モードは排他制御（`any_input_active()` で判定）。`m`（メタデータ表示トグル）は入力モードではなく単純なトグル
 
 入力の流れ: `load_csv()`（CLI引数 or stdin） → xlsx/xls なら開いたファイルを `CsvData::from_spreadsheet` に渡す、それ以外は `decode_to_utf8` → `CsvData::from_reader` → `CsvrApp::new(data, cx)` → GPUI ウィンドウ
+
+ブラウザ版の流れ: `web::run()` → `WebPlatform`（シングルスレッド、日本語は `CanvasFontFallback::EmojiAndCjk` でブラウザのフォントに描かせる）→ IBM Plex Sans（`assets/fonts/ibm-plex-sans`、OFL）を `add_fonts` → サンプル CSV で `CsvrApp` → `document` の `drop` で受けたファイルを読み、`CsvrApp::new` で置き換える。gpui_web はドロップされたファイルをアプリに渡さないので、`web-sys` で自分で受け取る。キーは `key_bindings` を `cmd` と `ctrl` の両方で割り当てる（web の `cmd` はどの OS でも Meta キーのため）
 
 `set_dock_icon()` は `assets/icon.png` を `include_bytes!` で埋め込み、`objc` クレートで `NSApplication.setApplicationIconImage:` を呼び出して Dock アイコンを設定する。アイコンは Lucide Icons の file-spreadsheet（ISC License、帰属表示は `assets/LICENSE`）を Catppuccin Mocha カラーで調整したもの
 
@@ -73,7 +79,7 @@ Rust 2024 edition（`edition = "2024"`）を使用。GPUI のバージョンは 
 
 ## CI
 
-ビルド・テスト・lint（`build.yml`, `test.yml`, `lint.yml`）は macOS ランナー（`macos-latest`）で実行。GPUI が Metal を必要とするため Linux では不可。ただし `lint.yml` の `cargo fmt --check` ジョブは Metal 不要のため `ubuntu-latest` で実行。これらのワークフローでは `--locked` フラグを使用（Cargo.lock を厳密に再現）。`cargo fmt` は `--locked` 非対応のため除く。テストと clippy は `default-members` でコアも対象になるが、CI では明示のため `--workspace` を付ける。`test.yml` の wasm32 ジョブ（ubuntu-latest）は、コアを `wasm32-unknown-unknown`（gpui_web と同じターゲット）で `cargo check` し、テストを `wasm32-wasip1` で wasmtime を使って実行する（`usize` が 4 バイトになる環境での確認。wasm32-unknown-unknown でテストを動かすには wasm-bindgen-test が要るため）。
+ビルド・テスト・lint（`build.yml`, `test.yml`, `lint.yml`）は macOS ランナー（`macos-latest`）で実行。GPUI が Metal を必要とするため Linux では不可。ただし `lint.yml` の `cargo fmt --check` ジョブは Metal 不要のため `ubuntu-latest` で実行。これらのワークフローでは `--locked` フラグを使用（Cargo.lock を厳密に再現）。`cargo fmt` は `--locked` 非対応のため除く。テストと clippy は `default-members` でコアも対象になるが、CI では明示のため `--workspace` を付ける。`test.yml` の wasm32 ジョブ（ubuntu-latest）は、コアを `wasm32-unknown-unknown`（gpui_web と同じターゲット）で `cargo check` し、テストを `wasm32-wasip1` で wasmtime を使って実行する。ブラウザ版も `cargo check --bin csvr --target wasm32-unknown-unknown` で確かめる（`usize` が 4 バイトになる環境での確認。wasm32-unknown-unknown でテストを動かすには wasm-bindgen-test が要るため）。
 
 その他のワークフロー（`claude.yml`, `claude-code-review.yml`, `issue-scan.yml`, `issue-implement.yml`）は `rysk-tanaka/workflows` の reusable workflow を呼び出す薄いラッパーで、ubuntu-latest で動作する。`auto-release.yml` は reusable workflow でリリース作成後、macOS ランナーで `aarch64-apple-darwin` / `x86_64-apple-darwin` のバイナリをビルドしリリースにアップロードする。
 
@@ -85,6 +91,7 @@ Rust 2024 edition（`edition = "2024"`）を使用。GPUI のバージョンは 
 
 ## 既知の設計トレードオフ
 
+- **ブラウザ版（試作）の制約**: `gpui_platform` の既定の feature `multithreaded`（nightly・COOP/COEP が必要）を切り、シングルスレッドで stable のままビルドする。フィルタは区切って処理するので固まらないが、ソートは区切らないので大きいファイルでは終わるまで入力を受け付けない。IBM Plex Sans にない文字のうち、CJK と絵文字はブラウザのフォントで描く（おおよその描画）が、それ以外の記号（ソートの ▲▼、「〜」など）は豆腐になる。`/` などの入力欄は `on_key_down` で文字を受けるので、IME や `insertText` での日本語入力は入らない。読み込みの失敗と推定した文字コード名はブラウザのコンソールにだけ出る（`eprintln!` はブラウザでは出ない）。クリップボードへの書き込みは https か localhost でないと黙って失敗する
 - **エンコーディング検出とメモリ**: `load_csv` のファイル読み込みは `std::fs::read` で全量バッファリングしてからエンコーディング検出を行う。UTF-8 と判明した場合はバッファを drop しファイルを再オープンしてストリーミング読み込み（再オープン失敗時はバッファにフォールバック）。非 UTF-8 の場合もトランスコード後にバッファを drop。最終メモリ使用量は `CsvData` が全行保持するため変わらないが、ピーク時の同時バッファ保持を回避。行データはセルごとに `String` を持たず `Table` に詰めるが、セルごとに区切り位置（`usize`: ネイティブ版 8 バイト、wasm32 4 バイト）を持つので、小さいセルが多い CSV ではファイルの数倍になる（100 万行 × 10 列・42.5MB の CSV で読み込み後 約 158MB。変更前は約 522MB。wasm32 は未計測）。`Table` の文字列は伸ばすたびに広い領域へ移るので読み込み中は一時的に増えるが、同じ CSV での最大と読み込み後の差は 10MB 未満だった。xlsx は calamine の `Range`（シート全体）と作っている途中の `Table` が同時にメモリにある
 - **`/` 検索の大文字小文字の比べ方**: `/` はエスケープしたクエリを case-insensitive な正規表現で比べる（セルごとの `to_lowercase` を避けるため）。Unicode の単純な折りたたみなので、`to_lowercase` とは少し結果が違う（İ は `i` にマッチせず、語末の Σ は `σ` にマッチする）
 - **不正なバイトを含む入力の扱い**: UTF-8 の BOM がある場合と、3 バイト以上の文字数が不正箇所の 4 倍以上ある場合は UTF-8 とみなして U+FFFD に置き換える。それ以外は正しい Shift_JIS などと区別できないため文字コードの推定に任せ、推定した文字コード名を stderr に出す。短い破損入力は文字化けすることがある

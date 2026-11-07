@@ -45,21 +45,27 @@ pub(crate) enum ShortcutModifier {
     Ctrl,
 }
 
-pub(crate) fn key_bindings(modifier: ShortcutModifier) -> Vec<KeyBinding> {
-    // `KeyBinding::new` takes `&'static str`, so the keystrokes are spelled out per modifier.
-    let [find, chart, copy, json, markdown] = match modifier {
-        ShortcutModifier::Cmd => ["cmd-f", "cmd-g", "cmd-c", "cmd-shift-j", "cmd-shift-m"],
-        ShortcutModifier::Ctrl => ["ctrl-f", "ctrl-g", "ctrl-c", "ctrl-shift-j", "ctrl-shift-m"],
-    };
+/// Bindings without a modifier come once, however many modifiers are given.
+pub(crate) fn key_bindings(modifiers: &[ShortcutModifier]) -> Vec<KeyBinding> {
     let context = Some("CsvrApp");
-    vec![
-        KeyBinding::new(find, ToggleSearch, context),
-        KeyBinding::new("escape", DismissSearch, context),
-        KeyBinding::new(chart, ToggleChart, context),
-        KeyBinding::new(copy, CopySelection, context),
-        KeyBinding::new(json, ExportJson, context),
-        KeyBinding::new(markdown, ExportMarkdown, context),
-    ]
+    let mut bindings = vec![KeyBinding::new("escape", DismissSearch, context)];
+    for modifier in modifiers {
+        // `KeyBinding::new` takes `&'static str`, so the keystrokes are spelled out per modifier.
+        let [find, chart, copy, json, markdown] = match modifier {
+            ShortcutModifier::Cmd => ["cmd-f", "cmd-g", "cmd-c", "cmd-shift-j", "cmd-shift-m"],
+            ShortcutModifier::Ctrl => {
+                ["ctrl-f", "ctrl-g", "ctrl-c", "ctrl-shift-j", "ctrl-shift-m"]
+            }
+        };
+        bindings.extend([
+            KeyBinding::new(find, ToggleSearch, context),
+            KeyBinding::new(chart, ToggleChart, context),
+            KeyBinding::new(copy, CopySelection, context),
+            KeyBinding::new(json, ExportJson, context),
+            KeyBinding::new(markdown, ExportMarkdown, context),
+        ]);
+    }
+    bindings
 }
 
 // Catppuccin Mocha palette
@@ -83,8 +89,8 @@ const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 /// number. Counted in the content width so the last column still reaches the right edge.
 const PINNED_BORDER_WIDTH: f32 = 1.0;
 /// Rows a filter task checks between yields. Small enough that a replaced task stops soon and a
-/// single-threaded build of the planned browser version (gpui_web), which runs background tasks
-/// on the UI thread, still handles input; large enough that yielding costs little.
+/// single-threaded browser build (gpui_web, `src/web.rs`), which runs background tasks on the UI
+/// thread, still handles input; large enough that yielding costs little.
 const FILTER_CHUNK_ROWS: usize = 50_000;
 
 /// Decided when a task starts, so the result is shown the way it was requested even if the
@@ -437,8 +443,8 @@ impl CsvrApp {
                             for start in (0..rows.row_count()).step_by(FILTER_CHUNK_ROWS) {
                                 let chunk = start..start + FILTER_CHUNK_ROWS;
                                 filter.filter_range(&rows, chunk, &mut indices);
-                                // Lets a replaced task stop here, and lets a single-threaded
-                                // build of the planned browser version handle input in between.
+                                // Lets a replaced task stop here, and lets the single-threaded
+                                // browser build handle input in between.
                                 yield_now().await;
                             }
                             indices

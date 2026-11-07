@@ -1,6 +1,7 @@
 //! Browser entry point (gpui_web). It shows a built-in sample until a file is dropped on the page.
 
 use std::borrow::Cow;
+use std::cell::Cell;
 use std::io::Cursor;
 use std::rc::Rc;
 
@@ -41,11 +42,14 @@ pub(crate) fn run() {
                 "../assets/fonts/ibm-plex-sans/IBMPlexSans-SemiBold.ttf"
             )),
         ]) {
+            // Keep going: CJK text still comes from the browser font, and a blank page would give
+            // no hint of what went wrong.
             log::error!("failed to load fonts: {e:#}");
-            return;
         }
-        cx.bind_keys(key_bindings(ShortcutModifier::Cmd));
-        cx.bind_keys(key_bindings(ShortcutModifier::Ctrl));
+        cx.bind_keys(key_bindings(&[
+            ShortcutModifier::Cmd,
+            ShortcutModifier::Ctrl,
+        ]));
 
         let sample = CsvData::from_reader(SAMPLE_CSV.as_bytes()).expect("the sample CSV is valid");
         let window = cx.open_window(WindowOptions::default(), |window, cx| {
@@ -68,16 +72,25 @@ fn listen_for_drops(window: WindowHandle<CsvrApp>, cx: AsyncApp) {
         log::error!("no document to listen for dropped files");
         return;
     };
+    // Reads finish in any order, so only the latest drop may replace the table. Otherwise a large
+    // file dropped first could finish last and cover the file the user picked afterwards.
+    let latest_drop = Rc::new(Cell::new(0u64));
     let on_drop =
         Closure::<dyn FnMut(web_sys::DragEvent)>::new(move |event: web_sys::DragEvent| {
             event.prevent_default();
-            let Some(file) = event
-                .data_transfer()
-                .and_then(|transfer| transfer.files())
-                .and_then(|files| files.get(0))
-            else {
+            let Some(files) = event.data_transfer().and_then(|transfer| transfer.files()) else {
                 return;
             };
+            let Some(file) = files.get(0) else {
+                log::warn!("the drop has no files");
+                return;
+            };
+            if files.length() > 1 {
+                log::warn!("{} files dropped; only the first is opened", files.length());
+            }
+            let drop_id = latest_drop.get() + 1;
+            latest_drop.set(drop_id);
+            let latest_drop = Rc::clone(&latest_drop);
             let mut cx = cx.clone();
             wasm_bindgen_futures::spawn_local(async move {
                 let name = file.name();
@@ -96,6 +109,10 @@ fn listen_for_drops(window: WindowHandle<CsvrApp>, cx: AsyncApp) {
                         return;
                     }
                 };
+                if latest_drop.get() != drop_id {
+                    log::info!("'{name}' was replaced by a later drop before it finished loading");
+                    return;
+                }
                 let replaced = window.update(&mut cx, |app, window, cx| {
                     *app = CsvrApp::new(data, cx);
                     window.focus(&app.focus_handle, cx);
@@ -116,7 +133,7 @@ fn listen_for_drops(window: WindowHandle<CsvrApp>, cx: AsyncApp) {
     on_drop.forget();
 }
 
-/// The same steps as the native build's stdin path, from bytes instead of a reader.
+/// The same steps as the native build's file path, from bytes instead of a file.
 fn load(name: &str, bytes: Vec<u8>) -> Result<CsvData, String> {
     let format = std::path::Path::new(name)
         .extension()
@@ -127,6 +144,9 @@ fn load(name: &str, bytes: Vec<u8>) -> Result<CsvData, String> {
     }
     let (text, decode_warning) = match decode_to_utf8(&bytes) {
         Some(Ok(decoded)) => {
+            // Free the original before parsing, as the native build does: wasm memory is capped,
+            // and the original, the transcoded copy and the table would otherwise coexist.
+            drop(bytes);
             if let Some(encoding) = decoded.decoded_as {
                 log::warn!("'{name}' is not valid UTF-8; decoded as {encoding}");
             }

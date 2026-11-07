@@ -146,7 +146,7 @@ pub(crate) fn run() {
             cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
             // No context: quitting must work wherever the focus is.
             cx.bind_keys([KeyBinding::new("cmd-q", Quit, None)]);
-            cx.bind_keys(key_bindings(ShortcutModifier::Cmd));
+            cx.bind_keys(key_bindings(&[ShortcutModifier::Cmd]));
             let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
             cx.open_window(
                 WindowOptions {

@@ -11,11 +11,11 @@ use regex::RegexBuilder;
 
 use crate::chart::{CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart};
 use crate::compute::{
-    ColumnStats, RowFilter, anchored_position, chart_legend, clamp_h_offset, compute_column_stats,
-    compute_column_widths, compute_histogram_bins, compute_numeric_columns, copied_status_message,
-    downsample, export_json, export_markdown, extract_column_values, extract_scatter_pairs,
-    filter_columns_by_regex, h_offset_to_reveal, histogram_axes, pairs_axes, parse_column_filter,
-    points_axes, row_number_col_width, sort_indices,
+    ColumnStats, RowFilter, RowPositions, anchored_position, chart_legend, clamp_h_offset,
+    compute_column_stats, compute_column_widths, compute_histogram_bins, compute_numeric_columns,
+    copied_status_message, downsample, export_json, export_markdown, extract_column_values,
+    extract_scatter_pairs, filter_columns_by_regex, h_offset_to_reveal, histogram_axes, pairs_axes,
+    parse_column_filter, points_axes, reorder_indices, row_number_col_width, sort_indices,
 };
 use crate::data::{CHART_TYPES, ChartAxes, ChartData, ChartType, CsvData, SortDirection};
 
@@ -57,53 +57,19 @@ const PINNED_BORDER_WIDTH: f32 = 1.0;
 /// single-threaded browser build still handles input; large enough that yielding costs little.
 const FILTER_CHUNK_ROWS: usize = 50_000;
 
-/// The view a filter task anchors its result to.
-struct FilterSnapshot {
-    previous: Arc<Vec<usize>>,
-    top: usize,
-    /// Original row index of the selection. The column is taken when the result is applied.
-    selected_row: Option<usize>,
-}
-
-impl FilterSnapshot {
-    fn matches(&self, other: &Self) -> bool {
-        let is_same_order = Arc::ptr_eq(&self.previous, &other.previous)
-            || (self.previous.is_empty() && other.previous.is_empty());
-        is_same_order && self.top == other.top && self.selected_row == other.selected_row
-    }
-}
-
-/// Where the view goes after a filter change that keeps the position. Both need a scan over the
-/// result, so the task computes them off the UI thread.
-struct Anchoring {
-    scroll_to: Option<usize>,
-    selected_pos: Option<usize>,
-}
-
-impl Anchoring {
-    fn compute(snapshot: &FilterSnapshot, new: &[usize]) -> Self {
-        Self {
-            scroll_to: anchored_position(&snapshot.previous, new, snapshot.top),
-            selected_pos: snapshot
-                .selected_row
-                .and_then(|row| new.iter().position(|&r| r == row)),
-        }
-    }
-}
-
 /// Decided when a task starts, so the result is shown the way it was requested even if the
 /// view changes meanwhile.
 enum ScrollTarget {
     /// After a sort, since the old position means nothing in the new order.
     Top,
-    Keep(Anchoring),
+    /// Where each row went, to anchor the view as it is when the result arrives.
+    Keep(RowPositions),
 }
 
 struct FilterResult {
     indices: Vec<usize>,
     /// Whether the rows were filtered again, rather than only the shown rows reordered.
     is_refiltered: bool,
-    snapshot: FilterSnapshot,
     scroll: ScrollTarget,
 }
 
@@ -405,7 +371,6 @@ impl CsvrApp {
             let use_numeric = self.numeric_columns.get(col).copied().unwrap_or(false);
             (col, use_numeric, direction)
         });
-        let snapshot = self.filter_snapshot();
         let scrolls_to_top = self.pending_scroll_to_top;
         self.filter_task = Some(cx.spawn(async move |this, cx| {
             let result = cx
@@ -425,26 +390,20 @@ impl CsvrApp {
                             }
                             indices
                         }
-                        None => shown.to_vec(),
+                        None => reorder_indices(&rows, &shown, sort),
                     };
-                    match sort {
-                        Some((col, use_numeric, direction)) => {
-                            indices = sort_indices(&rows, &indices, col, use_numeric, direction);
-                        }
-                        // Clearing a sort restores the file order, which filtering keeps.
-                        None if !is_refiltered => indices.sort_unstable(),
-                        None => {}
+                    if is_refiltered && let Some((col, use_numeric, direction)) = sort {
+                        indices = sort_indices(&rows, &indices, col, use_numeric, direction);
                     }
                     yield_now().await;
                     let scroll = if scrolls_to_top {
                         ScrollTarget::Top
                     } else {
-                        ScrollTarget::Keep(Anchoring::compute(&snapshot, &indices))
+                        ScrollTarget::Keep(RowPositions::new(&indices, rows.len()))
                     };
                     FilterResult {
                         indices,
                         is_refiltered,
-                        snapshot,
                         scroll,
                     }
                 })
@@ -454,42 +413,29 @@ impl CsvrApp {
         }));
     }
 
-    /// The order and top position the next result is anchored to. While the results are empty,
-    /// these come from before they became empty, since GPUI resets the offset of an empty list.
-    fn filter_snapshot(&self) -> FilterSnapshot {
-        let (previous, top) = if self.filtered_indices.is_empty() {
+    /// The order and top position a result is anchored to. While the results are empty, these
+    /// come from before they became empty, since GPUI resets the offset of an empty list.
+    fn anchor_view(&self) -> (Arc<Vec<usize>>, usize) {
+        if self.filtered_indices.is_empty() {
             self.rows_before_empty.clone().unwrap_or_default()
         } else {
             (self.filtered_indices.clone(), self.visible_range.start)
-        };
-        let selected_row = self
-            .selected_cell
-            .and_then(|(row, _)| previous.get(row).copied());
-        FilterSnapshot {
-            previous,
-            top,
-            selected_row,
         }
     }
 
     /// Show a finished filter result, keeping the view on the same rows where possible
-    /// (or scrolling to the top after a sort).
+    /// (or scrolling to the top after a sort). Anchors to the view as it is now, which may have
+    /// scrolled or changed its selection while the task ran.
     fn apply_filter_result(&mut self, result: FilterResult, cx: &mut Context<Self>) {
-        let current = self.filter_snapshot();
-        let is_anchored_to_stale_view =
-            matches!(result.scroll, ScrollTarget::Keep(_)) && !result.snapshot.matches(&current);
-        if is_anchored_to_stale_view {
-            self.reanchor_filter_result(result, current, cx);
-            return;
-        }
         let FilterResult {
             indices,
             is_refiltered,
             scroll,
-            ..
         } = result;
-        // Take the column from the current selection, which may have changed on the same row.
-        let selected_col = self.selected_cell.map(|(_, col)| col);
+        let (previous, top) = self.anchor_view();
+        let selected = self
+            .selected_cell
+            .and_then(|(row, col)| Some((*previous.get(row)?, col)));
 
         self.pending_scroll_to_top = false;
         if is_refiltered {
@@ -507,18 +453,20 @@ impl CsvrApp {
                 // The list only updates this when it renders, and another key can arrive before that.
                 self.visible_range = 0..self.visible_range.len();
             }
-            ScrollTarget::Keep(anchoring) => {
-                if let (Some(pos), Some(col)) = (anchoring.selected_pos, selected_col) {
+            ScrollTarget::Keep(positions) => {
+                if let Some((row, col)) = selected
+                    && let Some(pos) = positions.get(row)
+                {
                     self.selected_cell = Some((pos, col));
                     self.recompute_column_stats();
                 }
-                if let Some(pos) = anchoring.scroll_to {
+                if let Some(pos) = anchored_position(&previous, &positions, top) {
                     self.scroll_handle
                         .scroll_to_item_strict(pos, gpui::ScrollStrategy::Top);
                     self.visible_range = pos..pos + self.visible_range.len();
                 }
                 if self.filtered_indices.is_empty() {
-                    self.rows_before_empty = Some((current.previous, current.top));
+                    self.rows_before_empty = Some((previous, top));
                 }
             }
         }
@@ -526,32 +474,6 @@ impl CsvrApp {
             self.recompute_chart_data();
         }
         cx.notify();
-    }
-
-    /// The user scrolled or changed the selection while the task ran. Anchor again to the view
-    /// as it is now, off the UI thread like the first time, since this is most likely to happen
-    /// when filtering is slow.
-    fn reanchor_filter_result(
-        &mut self,
-        result: FilterResult,
-        snapshot: FilterSnapshot,
-        cx: &mut Context<Self>,
-    ) {
-        self.filter_task = Some(cx.spawn(async move |this, cx| {
-            let result = cx
-                .background_executor()
-                .spawn(async move {
-                    let anchoring = Anchoring::compute(&snapshot, &result.indices);
-                    FilterResult {
-                        snapshot,
-                        scroll: ScrollTarget::Keep(anchoring),
-                        ..result
-                    }
-                })
-                .await;
-            this.update(cx, |this, cx| this.apply_filter_result(result, cx))
-                .ok();
-        }));
     }
 
     fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {

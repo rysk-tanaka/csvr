@@ -67,22 +67,51 @@ pub(crate) fn h_offset_to_reveal(
     }
 }
 
+/// Where each original row sits in a filtered order. A filter task builds it off the UI thread,
+/// so the result can be anchored to whatever the view shows when it arrives with lookups only,
+/// even if the user scrolled or changed the selection while the task ran.
+pub(crate) struct RowPositions {
+    /// Indexed by original row; `NOT_SHOWN` for rows the order leaves out.
+    positions: Vec<usize>,
+    len: usize,
+}
+
+impl RowPositions {
+    const NOT_SHOWN: usize = usize::MAX;
+
+    pub(crate) fn new(order: &[usize], row_count: usize) -> Self {
+        let mut positions = vec![Self::NOT_SHOWN; row_count];
+        for (pos, &row) in order.iter().enumerate() {
+            if let Some(slot) = positions.get_mut(row) {
+                *slot = pos;
+            }
+        }
+        Self {
+            positions,
+            len: order.len(),
+        }
+    }
+
+    /// Position of `row` in the order, or `None` if the order leaves it out.
+    pub(crate) fn get(&self, row: usize) -> Option<usize> {
+        self.positions
+            .get(row)
+            .copied()
+            .filter(|&pos| pos != Self::NOT_SHOWN)
+    }
+}
+
 /// Position in `new` to show at the top of the view when the filtered rows change from `old`:
 /// the first row at or after `old[top]` that is still in `new`, or the last row of `new` if
 /// there is none. Returns `None` if either list is empty, since there is nothing to keep.
-pub(crate) fn anchored_position(old: &[usize], new: &[usize], top: usize) -> Option<usize> {
+pub(crate) fn anchored_position(old: &[usize], new: &RowPositions, top: usize) -> Option<usize> {
     if old.is_empty() {
         return None;
     }
-    let positions: HashMap<usize, usize> = new
-        .iter()
-        .enumerate()
-        .map(|(pos, &row)| (row, pos))
-        .collect();
     old.iter()
         .skip(top)
-        .find_map(|row| positions.get(row).copied())
-        .or_else(|| new.len().checked_sub(1))
+        .find_map(|&row| new.get(row))
+        .or_else(|| new.len.checked_sub(1))
 }
 
 /// The `/` search and the `&` regex filter, prepared once per query so that the rows can be
@@ -166,6 +195,24 @@ pub(crate) fn compute_numeric_columns(rows: &[Vec<String>], col_count: usize) ->
             non_empty_count > 0 && numeric_count > non_empty_count / 2
         })
         .collect()
+}
+
+/// Reorder rows already filtered for the current queries, for a sort change alone. Starts from
+/// file order, as a full refilter does, so rows that tie in the sort column keep file order
+/// instead of the order of the previous sort. With no sort, the result is file order.
+pub(crate) fn reorder_indices(
+    rows: &[Arc<Vec<String>>],
+    shown: &[usize],
+    sort: Option<(usize, bool, SortDirection)>,
+) -> Vec<usize> {
+    let mut file_order = shown.to_vec();
+    file_order.sort_unstable();
+    match sort {
+        Some((col, use_numeric, direction)) => {
+            sort_indices(rows, &file_order, col, use_numeric, direction)
+        }
+        None => file_order,
+    }
 }
 
 pub(crate) fn sort_indices(
@@ -940,6 +987,29 @@ mod tests {
         assert_eq!(out, vec![1]);
     }
 
+    // --- reorder_indices ---
+
+    #[test]
+    fn reorder_ties_keep_file_order_across_sorts() {
+        // Sorting by column 0 puts row 2 before row 1; a later sort by column 1 must not keep
+        // that order for the rows tied at "1".
+        let rows = make_rows(&[&["x", "2"], &["y", "1"], &["x", "1"]]);
+        let by_col0 = reorder_indices(
+            &rows,
+            &[0, 1, 2],
+            Some((0, false, SortDirection::Ascending)),
+        );
+        assert_eq!(by_col0, vec![0, 2, 1]);
+        let by_col1 = reorder_indices(&rows, &by_col0, Some((1, true, SortDirection::Ascending)));
+        assert_eq!(by_col1, vec![1, 2, 0]);
+    }
+
+    #[test]
+    fn reorder_without_sort_restores_file_order() {
+        let rows = make_rows(&[&["a"], &["b"], &["c"], &["d"]]);
+        assert_eq!(reorder_indices(&rows, &[3, 0, 2], None), vec![0, 2, 3]);
+    }
+
     // --- sort_indices ---
 
     #[test]
@@ -1558,45 +1628,56 @@ mod tests {
         assert_eq!(pattern, "unknown:x");
     }
 
-    // --- anchored_position ---
+    // --- anchored_position / RowPositions ---
+
+    fn anchor(old: &[usize], new: &[usize], top: usize) -> Option<usize> {
+        let row_count = old.iter().chain(new).max().map_or(0, |&max| max + 1);
+        anchored_position(old, &RowPositions::new(new, row_count), top)
+    }
+
+    #[test]
+    fn row_positions_looks_up_shown_rows() {
+        let positions = RowPositions::new(&[4, 0, 2], 5);
+        assert_eq!(positions.get(4), Some(0));
+        assert_eq!(positions.get(2), Some(2));
+        assert_eq!(positions.get(1), None);
+        assert_eq!(positions.get(9), None);
+    }
 
     #[test]
     fn anchored_position_keeps_unchanged_rows() {
-        assert_eq!(
-            anchored_position(&[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], 2),
-            Some(2)
-        );
+        assert_eq!(anchor(&[0, 1, 2, 3, 4], &[0, 1, 2, 3, 4], 2), Some(2));
     }
 
     #[test]
     fn anchored_position_moves_to_next_remaining_row() {
-        assert_eq!(anchored_position(&[0, 1, 2, 3, 4], &[1, 3, 4], 2), Some(1));
+        assert_eq!(anchor(&[0, 1, 2, 3, 4], &[1, 3, 4], 2), Some(1));
     }
 
     #[test]
     fn anchored_position_falls_back_to_last_row() {
-        assert_eq!(anchored_position(&[0, 1, 2, 3, 4], &[0, 1], 3), Some(1));
+        assert_eq!(anchor(&[0, 1, 2, 3, 4], &[0, 1], 3), Some(1));
     }
 
     #[test]
     fn anchored_position_follows_row_when_widening() {
-        assert_eq!(anchored_position(&[1, 3], &[0, 1, 2, 3, 4], 1), Some(3));
+        assert_eq!(anchor(&[1, 3], &[0, 1, 2, 3, 4], 1), Some(3));
     }
 
     #[test]
     fn anchored_position_uses_sorted_order() {
-        assert_eq!(anchored_position(&[4, 3, 2, 1, 0], &[0, 2, 4], 1), Some(1));
+        assert_eq!(anchor(&[4, 3, 2, 1, 0], &[0, 2, 4], 1), Some(1));
     }
 
     #[test]
     fn anchored_position_without_rows_to_keep() {
-        assert_eq!(anchored_position(&[0, 1], &[], 0), None);
-        assert_eq!(anchored_position(&[], &[0, 1], 0), None);
+        assert_eq!(anchor(&[0, 1], &[], 0), None);
+        assert_eq!(anchor(&[], &[0, 1], 0), None);
     }
 
     #[test]
     fn anchored_position_with_out_of_range_top() {
-        assert_eq!(anchored_position(&[0, 1], &[0, 1], 9), Some(1));
+        assert_eq!(anchor(&[0, 1], &[0, 1], 9), Some(1));
     }
 
     // --- RowFilter: `&` regex ---

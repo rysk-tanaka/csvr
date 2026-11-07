@@ -725,6 +725,204 @@ pub fn export_markdown(
     out
 }
 
+/// The horizontal shift that keeps the caret inside a single-line input of `width`: none while
+/// the caret fits, otherwise enough to put the caret at the right edge.
+pub fn caret_scroll_offset(caret_x: f32, caret_width: f32, width: f32) -> f32 {
+    (caret_x + caret_width - width).max(0.0)
+}
+
+/// The text being edited in an input bar, with the selection and the IME's composing range.
+/// Ranges are byte offsets on char boundaries; the `_utf16` methods take and return UTF-16
+/// offsets, which is what platform text input uses.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextInputState {
+    text: String,
+    selected: Range<usize>,
+    marked: Option<Range<usize>>,
+    /// Set by `replace_and_mark` even when the composing text becomes empty, and cleared by
+    /// `replace` / `unmark`. The browser keeps composing until compositionend in that case.
+    composition_open: bool,
+}
+
+impl TextInputState {
+    pub fn new(text: impl Into<String>) -> Self {
+        let text = text.into();
+        let end = text.len();
+        Self {
+            text,
+            selected: end..end,
+            marked: None,
+            composition_open: false,
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Byte range of the selection; empty when it is only a caret.
+    pub fn selected_range(&self) -> Range<usize> {
+        self.selected.clone()
+    }
+
+    /// Byte range of the composing text, for drawing its underline.
+    pub fn marked_range(&self) -> Option<Range<usize>> {
+        self.marked.clone()
+    }
+
+    pub fn is_composing(&self) -> bool {
+        self.marked.is_some()
+    }
+
+    pub fn is_composition_open(&self) -> bool {
+        self.composition_open
+    }
+
+    pub fn len_utf16(&self) -> usize {
+        self.text.encode_utf16().count()
+    }
+
+    pub fn selected_range_utf16(&self) -> Range<usize> {
+        self.range_to_utf16(&self.selected)
+    }
+
+    pub fn marked_range_utf16(&self) -> Option<Range<usize>> {
+        self.marked.as_ref().map(|range| self.range_to_utf16(range))
+    }
+
+    /// Returns the text in `range_utf16` and the UTF-16 range it actually covers after the
+    /// range is fitted to the text.
+    pub fn text_for_range_utf16(&self, range_utf16: Range<usize>) -> (String, Range<usize>) {
+        let range = self.range_from_utf16(&range_utf16);
+        (
+            self.text[range.clone()].to_string(),
+            self.range_to_utf16(&range),
+        )
+    }
+
+    /// Commits `new_text` over `range_utf16`, or over the composing text or the selection when
+    /// no range is given. The caret ends up right after the inserted text.
+    pub fn replace(&mut self, range_utf16: Option<Range<usize>>, new_text: &str) {
+        let range = self.edit_range(range_utf16);
+        let inserted_end = self.splice(range, new_text);
+        self.selected = inserted_end..inserted_end;
+        self.marked = None;
+        self.composition_open = false;
+    }
+
+    /// Puts `new_text` over the range like `replace`, and marks it as the composing text.
+    /// `new_selected_utf16` is relative to the start of the inserted text.
+    pub fn replace_and_mark(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_utf16: Option<Range<usize>>,
+    ) {
+        let range = self.edit_range(range_utf16);
+        let inserted_end = self.splice(range.clone(), new_text);
+        let inserted = range.start..inserted_end;
+        self.marked = (!inserted.is_empty()).then(|| inserted.clone());
+        self.selected = match new_selected_utf16 {
+            Some(selected) => {
+                let start_utf16 = self.offset_to_utf16(inserted.start);
+                let inserted_len_utf16 = self.offset_to_utf16(inserted.end) - start_utf16;
+                let relative = order(selected);
+                self.range_from_utf16(
+                    &(start_utf16 + relative.start.min(inserted_len_utf16)
+                        ..start_utf16 + relative.end.min(inserted_len_utf16)),
+                )
+            }
+            None => inserted_end..inserted_end,
+        };
+        self.composition_open = true;
+    }
+
+    /// Ends composing and keeps the composing text as committed text where it is.
+    pub fn unmark(&mut self) {
+        self.marked = None;
+        self.composition_open = false;
+    }
+
+    pub fn set_selected_range_utf16(&mut self, range_utf16: Range<usize>) {
+        self.selected = self.range_from_utf16(&range_utf16);
+    }
+
+    pub fn select_all(&mut self) {
+        // The IME owns the selection while composing.
+        if self.is_composing() {
+            return;
+        }
+        self.selected = 0..self.text.len();
+    }
+
+    /// Deletes the selection, or the char before the caret when the selection is empty.
+    pub fn delete_backward(&mut self) {
+        let range = if self.selected.is_empty() {
+            let end = self.selected.start;
+            let start = self.text[..end]
+                .char_indices()
+                .next_back()
+                .map_or(end, |(index, _)| index);
+            start..end
+        } else {
+            self.selected.clone()
+        };
+        self.text.replace_range(range.clone(), "");
+        self.selected = range.start..range.start;
+        self.marked = None;
+    }
+
+    fn edit_range(&self, range_utf16: Option<Range<usize>>) -> Range<usize> {
+        range_utf16
+            .map(|range| self.range_from_utf16(&range))
+            .or_else(|| self.marked.clone())
+            .unwrap_or_else(|| self.selected.clone())
+    }
+
+    /// Replaces `range` with `new_text` and returns where the inserted text ends.
+    fn splice(&mut self, range: Range<usize>, new_text: &str) -> usize {
+        // The bars hold a one-line query, and shaping a line rejects newlines. Each newline
+        // becomes one space, so offsets the platform computed from `new_text` stay valid.
+        let new_text = new_text.replace(['\n', '\r'], " ");
+        self.text.replace_range(range.clone(), &new_text);
+        range.start + new_text.len()
+    }
+
+    fn offset_to_utf16(&self, offset: usize) -> usize {
+        self.text[..offset].encode_utf16().count()
+    }
+
+    fn range_to_utf16(&self, range: &Range<usize>) -> Range<usize> {
+        self.offset_to_utf16(range.start)..self.offset_to_utf16(range.end)
+    }
+
+    /// Fits a UTF-16 offset to the text, rounding down to a char boundary so an offset inside a
+    /// surrogate pair cannot split a char.
+    fn offset_from_utf16(&self, offset_utf16: usize) -> usize {
+        let mut utf16_count = 0;
+        for (index, ch) in self.text.char_indices() {
+            if utf16_count + ch.len_utf16() > offset_utf16 {
+                return index;
+            }
+            utf16_count += ch.len_utf16();
+        }
+        self.text.len()
+    }
+
+    fn range_from_utf16(&self, range_utf16: &Range<usize>) -> Range<usize> {
+        let range = order(range_utf16.clone());
+        self.offset_from_utf16(range.start)..self.offset_from_utf16(range.end)
+    }
+}
+
+fn order(range: Range<usize>) -> Range<usize> {
+    if range.start <= range.end {
+        range
+    } else {
+        range.end..range.start
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1982,5 +2180,207 @@ mod tests {
         let headers: Vec<String> = vec!["a".into(), "a_2".into(), "a".into()];
         let keys = deduplicate_json_keys(&headers, &[0, 1, 2]);
         assert_eq!(keys, vec!["a", "a_2", "a_3"]);
+    }
+
+    // --- caret_scroll_offset ---
+
+    #[test]
+    fn caret_scroll_offset_is_zero_while_the_caret_fits() {
+        assert_eq!(caret_scroll_offset(50.0, 1.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn caret_scroll_offset_is_zero_at_the_right_edge() {
+        assert_eq!(caret_scroll_offset(99.0, 1.0, 100.0), 0.0);
+    }
+
+    #[test]
+    fn caret_scroll_offset_puts_an_overflowing_caret_at_the_right_edge() {
+        assert_eq!(caret_scroll_offset(150.0, 1.0, 100.0), 51.0);
+    }
+
+    #[test]
+    fn caret_scroll_offset_with_no_width_keeps_the_caret_at_the_left_edge() {
+        assert_eq!(caret_scroll_offset(30.0, 1.0, 0.0), 31.0);
+    }
+
+    // --- TextInputState ---
+
+    #[test]
+    fn text_input_new_puts_the_caret_at_the_end() {
+        let state = TextInputState::new("東京");
+        assert_eq!(state.selected_range_utf16(), 2..2);
+        assert_eq!(state.marked_range_utf16(), None);
+        assert!(!state.is_composing());
+    }
+
+    #[test]
+    fn text_input_replace_appends_at_the_caret() {
+        let mut state = TextInputState::new("ab");
+        state.replace(None, "c");
+        assert_eq!(state.text(), "abc");
+        assert_eq!(state.selected_range_utf16(), 3..3);
+    }
+
+    #[test]
+    fn text_input_composition_is_updated_then_committed() {
+        let mut state = TextInputState::new("a");
+        state.replace_and_mark(None, "k", None);
+        assert_eq!(state.text(), "ak");
+        assert_eq!(state.marked_range_utf16(), Some(1..2));
+        state.replace_and_mark(None, "か", None);
+        assert_eq!(state.text(), "aか");
+        assert_eq!(state.marked_range_utf16(), Some(1..2));
+        state.replace(None, "科");
+        assert_eq!(state.text(), "a科");
+        assert_eq!(state.marked_range_utf16(), None);
+        assert_eq!(state.selected_range_utf16(), 2..2);
+        assert!(!state.is_composition_open());
+    }
+
+    #[test]
+    fn text_input_empty_composition_stays_open_until_unmark() {
+        let mut state = TextInputState::new("a");
+        state.replace_and_mark(None, "か", None);
+        state.replace_and_mark(None, "", None);
+        assert_eq!(state.text(), "a");
+        assert!(!state.is_composing());
+        assert!(state.is_composition_open());
+        state.unmark();
+        assert!(!state.is_composing());
+        assert!(!state.is_composition_open());
+    }
+
+    #[test]
+    fn text_input_unmark_keeps_the_text_and_the_selection() {
+        let mut state = TextInputState::new("");
+        state.replace_and_mark(None, "とうきょう", Some(0..2));
+        state.unmark();
+        assert_eq!(state.text(), "とうきょう");
+        assert_eq!(state.selected_range_utf16(), 0..2);
+    }
+
+    #[test]
+    fn text_input_replace_in_the_middle_keeps_the_text_after_the_range() {
+        let mut state = TextInputState::new("abcXYZ");
+        state.replace(Some(1..2), "Q");
+        assert_eq!(state.text(), "aQcXYZ");
+        assert_eq!(state.selected_range_utf16(), 2..2);
+    }
+
+    #[test]
+    fn text_input_replace_part_of_the_marked_text() {
+        let mut state = TextInputState::new("");
+        state.replace_and_mark(None, "かんじ", None);
+        state.replace_and_mark(Some(1..2), "ン", None);
+        assert_eq!(state.text(), "かンじ");
+        assert_eq!(state.marked_range_utf16(), Some(1..2));
+    }
+
+    #[test]
+    fn text_input_reconversion_marks_committed_text_without_changing_it() {
+        let mut state = TextInputState::new("東京");
+        state.replace_and_mark(Some(0..2), "東京", None);
+        assert_eq!(state.text(), "東京");
+        assert_eq!(state.marked_range_utf16(), Some(0..2));
+    }
+
+    #[test]
+    fn text_input_selection_inside_the_marked_text_is_relative() {
+        let mut state = TextInputState::new("x");
+        state.replace_and_mark(None, "とうきょう", Some(2..5));
+        assert_eq!(state.selected_range_utf16(), 3..6);
+    }
+
+    #[test]
+    fn text_input_selection_inside_the_marked_text_is_fitted_to_it() {
+        let mut state = TextInputState::new("x");
+        state.replace_and_mark(None, "かな", Some(1..10));
+        assert_eq!(state.selected_range_utf16(), 2..3);
+    }
+
+    #[test]
+    fn text_input_ranges_past_the_end_are_fitted() {
+        let mut state = TextInputState::new("ab");
+        assert_eq!(state.text_for_range_utf16(1..10), ("b".to_string(), 1..2));
+        state.replace(Some(5..9), "c");
+        assert_eq!(state.text(), "abc");
+    }
+
+    #[test]
+    // The platform can hand over a reversed range, which is what this checks.
+    #[allow(clippy::reversed_empty_ranges)]
+    fn text_input_reversed_ranges_are_ordered() {
+        let state = TextInputState::new("abc");
+        assert_eq!(state.text_for_range_utf16(2..1), ("b".to_string(), 1..2));
+    }
+
+    #[test]
+    fn text_input_offsets_inside_a_surrogate_pair_do_not_split_it() {
+        let mut state = TextInputState::new("a😀b");
+        assert_eq!(state.len_utf16(), 4);
+        // UTF-16 offset 2 is between the two halves of the emoji.
+        assert_eq!(state.text_for_range_utf16(2..4), ("😀b".to_string(), 1..4));
+        state.set_selected_range_utf16(2..2);
+        assert_eq!(state.selected_range_utf16(), 1..1);
+    }
+
+    #[test]
+    fn text_input_japanese_utf16_offsets() {
+        let state = TextInputState::new("部署:営業");
+        assert_eq!(state.len_utf16(), 5);
+        assert_eq!(state.text_for_range_utf16(3..5), ("営業".to_string(), 3..5));
+    }
+
+    #[test]
+    fn text_input_delete_backward_removes_the_char_before_the_caret() {
+        let mut state = TextInputState::new("営業");
+        state.delete_backward();
+        assert_eq!(state.text(), "営");
+        assert_eq!(state.selected_range_utf16(), 1..1);
+    }
+
+    #[test]
+    fn text_input_delete_backward_removes_the_selection() {
+        let mut state = TextInputState::new("abcd");
+        state.set_selected_range_utf16(1..3);
+        state.delete_backward();
+        assert_eq!(state.text(), "ad");
+        assert_eq!(state.selected_range_utf16(), 1..1);
+    }
+
+    #[test]
+    fn text_input_delete_backward_on_empty_text_does_nothing() {
+        let mut state = TextInputState::new("");
+        state.delete_backward();
+        assert_eq!(state.text(), "");
+        assert_eq!(state.selected_range_utf16(), 0..0);
+    }
+
+    #[test]
+    fn text_input_select_all_then_replace() {
+        let mut state = TextInputState::new("abc");
+        state.select_all();
+        assert_eq!(state.selected_range_utf16(), 0..3);
+        state.replace(None, "x");
+        assert_eq!(state.text(), "x");
+    }
+
+    #[test]
+    fn text_input_select_all_is_ignored_while_composing() {
+        let mut state = TextInputState::new("a");
+        state.replace_and_mark(None, "か", None);
+        state.select_all();
+        assert_eq!(state.selected_range_utf16(), 2..2);
+    }
+
+    #[test]
+    fn text_input_newlines_become_spaces() {
+        let mut state = TextInputState::new("");
+        state.replace(None, "a\r\nb");
+        assert_eq!(state.text(), "a  b");
+        state.replace_and_mark(None, "c\nd", None);
+        assert_eq!(state.text(), "a  bc d");
+        assert_eq!(state.marked_range_utf16(), Some(4..7));
     }
 }

@@ -17,7 +17,7 @@ use crate::compute::{
     extract_scatter_pairs, filter_columns_by_regex, h_offset_to_reveal, histogram_axes, pairs_axes,
     parse_column_filter, points_axes, reorder_indices, row_number_col_width, sort_indices,
 };
-use crate::data::{CHART_TYPES, ChartAxes, ChartData, ChartType, CsvData, SortDirection};
+use crate::data::{CHART_TYPES, ChartAxes, ChartData, ChartType, CsvData, SortDirection, Table};
 
 actions!(
     csvr,
@@ -86,7 +86,9 @@ struct FilterResult {
 struct TableRow {
     ix: usize,
     row_num: usize,
-    cells: Arc<Vec<String>>,
+    rows: Arc<Table>,
+    /// Index of this row in `rows`, which is `row_num - 1`.
+    row: usize,
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
     row_width: gpui::Pixels,
@@ -117,7 +119,8 @@ impl RenderOnce for TableRow {
 
         let make_cell = |col_idx: usize, entity: Entity<CsvrApp>| {
             let width = self.col_widths.get(col_idx).copied().unwrap_or(0.0);
-            let text: SharedString = self.cells.get(col_idx).cloned().unwrap_or_default().into();
+            let text =
+                SharedString::from(self.rows.cell(self.row, col_idx).unwrap_or("").to_string());
             let is_cell_selected = matches!(selected_col, Some(Some(c)) if c == col_idx);
             div()
                 .id(SharedString::from(format!("cell-{}-{}", ix, col_idx)))
@@ -220,7 +223,7 @@ pub(crate) struct CsvrApp {
     /// Original headers (not uppercased) for regex matching and column filter parsing
     raw_headers: Vec<String>,
     /// Shared with filter tasks running off the UI thread.
-    rows: Arc<Vec<Arc<Vec<String>>>>,
+    rows: Arc<Table>,
     col_widths: Rc<Vec<f32>>,
     numeric_columns: Vec<bool>,
     row_num_width: f32,
@@ -293,7 +296,7 @@ impl CsvrApp {
 
     pub(crate) fn new(data: CsvData, cx: &mut Context<Self>) -> Self {
         let col_widths = Rc::new(compute_column_widths(&data));
-        let row_num_width = row_number_col_width(data.rows.len());
+        let row_num_width = row_number_col_width(data.rows.row_count());
         let col_count = data.headers.len();
         let numeric_columns = compute_numeric_columns(&data.rows, col_count);
         let raw_headers = data.headers.clone();
@@ -302,8 +305,8 @@ impl CsvrApp {
             .iter()
             .map(|h| SharedString::from(h.to_uppercase()))
             .collect();
-        let total_rows = data.rows.len();
-        let rows = Arc::new(data.rows.into_iter().map(Arc::new).collect());
+        let total_rows = data.rows.row_count();
+        let rows = Arc::new(data.rows);
         // Find first two numeric columns for chart defaults
         let first_numeric = numeric_columns.iter().position(|&b| b).unwrap_or(0);
         let second_numeric = numeric_columns
@@ -390,7 +393,7 @@ impl CsvrApp {
                     let mut indices = match source {
                         RowSource::Filter(filter) => {
                             let mut indices = Vec::new();
-                            for start in (0..rows.len()).step_by(FILTER_CHUNK_ROWS) {
+                            for start in (0..rows.row_count()).step_by(FILTER_CHUNK_ROWS) {
                                 let chunk = start..start + FILTER_CHUNK_ROWS;
                                 filter.filter_range(&rows, chunk, &mut indices);
                                 // Lets a replaced task stop here, and lets a single-threaded
@@ -408,7 +411,7 @@ impl CsvrApp {
                     let scroll = if scrolls_to_top {
                         ScrollTarget::Top
                     } else {
-                        ScrollTarget::Keep(RowPositions::new(&indices, rows.len()))
+                        ScrollTarget::Keep(RowPositions::new(&indices, rows.row_count()))
                     };
                     FilterResult {
                         indices,
@@ -711,16 +714,16 @@ impl CsvrApp {
         let Some(&original_idx) = self.filtered_indices.get(filtered_idx) else {
             return;
         };
-        let Some(row) = self.rows.get(original_idx) else {
+        let Some(row) = self.rows.row(original_idx) else {
             return;
         };
 
         let text = match col {
-            Some(c) => row.get(c).cloned().unwrap_or_default(),
+            Some(c) => row.get(c).unwrap_or("").to_string(),
             None => self
                 .visible_col_indices
                 .iter()
-                .filter_map(|&c| row.get(c).cloned())
+                .filter_map(|&c| row.get(c))
                 .collect::<Vec<_>>()
                 .join("\t"),
         };
@@ -934,7 +937,7 @@ impl Render for CsvrApp {
         ));
         let row_width = px(content_width.max(viewport_width));
         let filtered_count = self.filtered_indices.len();
-        let total_count = self.rows.len();
+        let total_count = self.rows.row_count();
         // The count is from the last result, so say when a newer one is still on its way.
         let rows_text = if self.is_filtering() {
             format!("{} / {} rows (filtering...)", filtered_count, total_count)
@@ -1655,6 +1658,9 @@ impl Render for CsvrApp {
                             range
                                 .filter_map(|i| {
                                     let original_idx = *this.filtered_indices.get(i)?;
+                                    if original_idx >= this.rows.row_count() {
+                                        return None;
+                                    }
                                     let selected_col =
                                         this.selected_cell.and_then(|(sel_row, col)| {
                                             if sel_row == i { Some(col) } else { None }
@@ -1662,7 +1668,8 @@ impl Render for CsvrApp {
                                     Some(TableRow {
                                         ix: i,
                                         row_num: original_idx + 1,
-                                        cells: this.rows.get(original_idx)?.clone(),
+                                        rows: this.rows.clone(),
+                                        row: original_idx,
                                         col_widths: this.col_widths.clone(),
                                         row_num_width: this.row_num_width,
                                         row_width,

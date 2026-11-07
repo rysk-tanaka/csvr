@@ -9,11 +9,11 @@ paths:
 
 `CsvrApp` の状態変更は専用メソッドに集約し、関連する副作用（フィルタ再計算、スクロールリセット等）の呼び忘れを防ぐ。
 
-- `set_search_query()` — クエリ変更 + `refilter_keeping_position`
-- `refilter_keeping_position()` — `/` と `&` の入力で再計算し、表示位置と選択を維持する。画面先頭の行以降で最初に残った行を先頭に出す（なければ最後の行）。選択は行が残れば追従し、消えれば解除するだけで、スクロールはしない。GPUI は空のリストのオフセットを 0 に補正するので、0 件になる前の並びと先頭位置を `rows_before_empty` に保持する。`visible_range` は描画でしか更新されないので、次の入力に備えて新しい先頭位置に更新する
+- `set_search_query()` — クエリ変更 + `needs_refilter` を立てて `recompute_filtered_indices` に依頼
 - `toggle_search()` / `close_search()` — 検索バーの表示切替。`close_search` はバーを閉じるがクエリを維持（全コマンド共通の Escape 挙動）
-- `toggle_sort(col)` — ソート状態サイクル（None → Asc → Desc → None）+ `recompute_filtered_indices` + スクロール先頭リセット
-- `recompute_filtered_indices()` — `/` フィルタ → `&` 正規表現フィルタ → ソートを一貫適用 + 選択クリア。`refilter_keeping_position`、`toggle_sort` から呼ばれる
+- `toggle_sort(col)` — ソート状態サイクル（None → Asc → Desc → None）。`rows_before_empty` を消し、`pending_scroll_to_top` を立てて `recompute_filtered_indices` に依頼する
+- `recompute_filtered_indices()` — `background_executor` のタスクで、`/` フィルタと `&` 正規表現フィルタ（`RowFilter` で 1 回の走査）→ ソートを計算する。`needs_refilter` が立っていなければ（ソートだけの変更）、表示中の行を `reorder_indices` で並べ替えるだけにする。並べ替えはファイル順から始めるので、同じ値の行はフィルタし直したときと同じくファイル順になる（前のソート順を引き継がない）。ソート解除はファイル順に戻す。`filter_task` を置き換えると前のタスクは捨てられる。`FILTER_CHUNK_ROWS` 行ごとと、ソートの後に `yield_now` で処理を譲るので、置き換えたタスクはそこで止まり、予定しているブラウザ版（gpui_web）がシングルスレッドで動く場合も入力が通る（ソート自体は一括）。計算中も表示・選択・統計・チャートは古い結果のまま（コピーが表示と食い違わない）。計算中は件数の表示に `(filtering...)` を付け、エクスポートは受け付けない（`is_ready_to_export`）。古い結果を絞り込み後のデータと取り違えて書き出すのを防ぐため。フィルタし直すときは表示中の並びをタスクに渡さない（`RowSource`）。スクロールの扱い（`ScrollTarget`）は依頼の時点で決める。`pending_scroll_to_top` なら `Top`、そうでなければ元の行→新しい位置の対応表（`RowPositions`、全行数ぶんの `u32`）もタスクの中で作って `Keep` にする。表示中の並びは `Arc<Vec<usize>>` なので、ソートだけの変更でもコピーせずに渡せる
+- `apply_filter_result()` — タスクの結果を表示に反映し、`filter_task` を外す（計算中かどうかは `is_filtering` がこれで判定する）。位置合わせは結果が届いた時点の表示（`anchor_view` の並びと先頭位置、選択）に対して、`RowPositions` を引くだけで行う。計算中にスクロールや選択の変更があっても計算し直さずに済み、UI スレッドで全件を走査しない。選択と統計は必ず消してから戻し、`pending_scroll_to_top` を下ろし、フィルタし直した結果なら `needs_refilter` も下ろす。`Top` なら先頭へスクロールし、選択は戻さず、0 件でも `rows_before_empty` を保存しない（ソートの直後に入力してタスクが置き換わっても同じ）。`Keep` なら、画面先頭の行以降で最初に残った行を先頭に出す（なければ最後の行）。選択は行が残れば追従し（列は今の選択のまま）、消えれば解除するだけで、スクロールはしない。GPUI は空のリストのオフセットを 0 に補正するので、0 件になる前の並びと先頭位置を `rows_before_empty` に保持する。`visible_range` は描画でしか更新されないので、次の入力に備えて新しい先頭位置に更新する
 - `select_cell(filtered_idx, col)` — セル選択。`col=None` で行全体選択
 - `clear_selection()` — 選択解除（Escape で呼ばれる）
 - `move_selection(row_delta, col_delta, viewport_width)` — 矢印キーによるカーソル移動 + `ensure_visible`（縦）と `ensure_col_visible`（横）で自動スクロール。上下キーでも選択中のセルが見えるように横へ動かす。固定列と行全体の選択では横に動かさない。列変更時のみ `recompute_column_stats` を呼ぶ（行のみ移動時はスキップ）
@@ -21,11 +21,11 @@ paths:
 - `toggle_chart()` — チャートパネルの表示/非表示切替（`Cmd+G`）
 - `set_chart_type(ct)` — チャートタイプ変更（Bar / Line / Scatter / Histogram）
 - `set_chart_col(col)` / `set_chart_x_col(col)` — チャート対象列の変更（数値列のみ）+ `recompute_chart_data`
-- `recompute_chart_data()` — `chart_data_cache` を再計算。`toggle_chart`、`set_chart_type`、`set_chart_col`、`set_chart_x_col`、`recompute_filtered_indices` から呼ばれる
-- `recompute_column_stats()` — `column_stats_cache` を再計算。`select_cell` と、選択が残ったときの `refilter_keeping_position` から呼ばれる。`recompute_filtered_indices` ではキャッシュを直接 `None` にクリア
+- `recompute_chart_data()` — `chart_data_cache` を再計算。`toggle_chart`、`set_chart_type`、`set_chart_col`、`set_chart_x_col`、`apply_filter_result` から呼ばれる
+- `recompute_column_stats()` — `column_stats_cache` を再計算。`select_cell` と、選択が残ったときの `apply_filter_result` から呼ばれる。`apply_filter_result` ではまずキャッシュを直接 `None` にクリアする
 - `toggle_col_filter()` / `set_col_filter_query()` / `close_col_filter()` — `*` コマンドによる列フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_visible_columns()` は呼ばない）
 - `toggle_pin_input()` / `confirm_pin_input()` / `cancel_pin_input()` — `f` コマンドによる列固定。空入力で Enter → `pinned_col_count = 0`（リセット）
-- `toggle_row_filter()` / `set_row_filter_query()` / `close_row_filter()` — `&` コマンドによる行の正規表現フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_filtered_indices()` は呼ばない）。`col:pattern` 構文で列指定可能。入力時は `refilter_keeping_position` で表示位置を維持する
+- `toggle_row_filter()` / `set_row_filter_query()` / `close_row_filter()` — `&` コマンドによる行の正規表現フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_filtered_indices()` は呼ばない）。`col:pattern` 構文で列指定可能。入力時は `needs_refilter` を立てて `recompute_filtered_indices` に依頼し、`apply_filter_result` が表示位置を維持する。エラーフラグは結果を待たずに入力の時点で判定する（バーを閉じた後に結果が来ても立ち直らない）。正規表現の設定は `RowFilter::build_regex` の 1 か所で、検証（`RowFilter::is_valid_pattern`）とフィルタで食い違わない
 
 ## ステータスバー
 
@@ -33,7 +33,7 @@ paths:
 - **操作の結果は一時メッセージ** — `show_status_message` で `status_message` に設定し、`STATUS_MESSAGE_DURATION` のあとで消す。タイマーの `Task` を保持して置き換えると前のタイマーが止まるので、新しいメッセージは全期間表示される。表示欄は 1 つで、一時メッセージを優先し、消えると警告に戻る
 - **エクスポートはデータがなければクリップボードを書き換えない** — 表示列が空、または表示行が 0 件のときは `No data to export` と表示する。`export_json` などはこの場合も `[]` やヘッダーを返すので、`finish_export` で判定する
 - **メッセージと統計は内容の幅に応じて縮める** — どちらも省略表示にする。ウィンドウが狭くても両方の一部が見える。GPUI は `whitespace_nowrap` でも改行で行を分けるので、1 行に保つためにシート名の改行は空白に置き換える
-- **統計は `column_stats_cache` にキャッシュ** — `chart_data_cache` と同様のパターン。`select_cell` と、選択が残ったときの `refilter_keeping_position` でのみ `recompute_column_stats()` で再計算し、`recompute_filtered_indices` ではクリアする。`render()` ではキャッシュを参照するだけ（ホバーやリサイズによる再描画で O(n) 計算が走るのを防ぐ）
+- **統計は `column_stats_cache` にキャッシュ** — `chart_data_cache` と同様のパターン。`select_cell` と、選択が残ったときの `apply_filter_result` でのみ `recompute_column_stats()` で再計算し、それ以外の `apply_filter_result` ではクリアする。`render()` ではキャッシュを参照するだけ（ホバーやリサイズによる再描画で O(n) 計算が走るのを防ぐ）
 - **median/stddev の追加で Vec 蓄積が必要に** — median はソートが必須のため単一パスでは不可能。値を `Vec<f64>` に蓄積し、sum/min/max は蓄積と同時に計算。stddev は標本標準偏差（Bessel 補正: `n-1` 除算）、2パス方式（数値安定性のため）。`count == 1` 時は `0.0`。パフォーマンス影響は `recompute_column_stats` がセル選択の変更時と、選択が残っている間のフィルタ入力時にだけ呼ばれることで限定
 - **表示フォーマット** — 整数値は小数点なし、それ以外は小数4桁。`format_stat()` ヘルパーで統一。閾値は f64 仮数部の精度限界（2^53 ≈ 9.0e15）
 

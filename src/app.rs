@@ -1,4 +1,6 @@
-use std::{ops::Range, rc::Rc, time::Duration};
+use std::{ops::Range, rc::Rc, sync::Arc, time::Duration};
+
+use futures_lite::future::yield_now;
 
 use gpui::{
     App, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyDownEvent,
@@ -9,11 +11,11 @@ use regex::RegexBuilder;
 
 use crate::chart::{CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart};
 use crate::compute::{
-    ColumnStats, anchored_position, chart_legend, clamp_h_offset, compute_column_stats,
-    compute_column_widths, compute_histogram_bins, compute_numeric_columns, copied_status_message,
-    downsample, export_json, export_markdown, extract_column_values, extract_scatter_pairs,
-    filter_columns_by_regex, filter_rows, filter_rows_regex, h_offset_to_reveal, histogram_axes,
-    pairs_axes, parse_column_filter, points_axes, row_number_col_width, sort_indices,
+    ColumnStats, RowFilter, RowPositions, anchored_position, chart_legend, clamp_h_offset,
+    compute_column_stats, compute_column_widths, compute_histogram_bins, compute_numeric_columns,
+    copied_status_message, downsample, export_json, export_markdown, extract_column_values,
+    extract_scatter_pairs, filter_columns_by_regex, h_offset_to_reveal, histogram_axes, pairs_axes,
+    parse_column_filter, points_axes, reorder_indices, row_number_col_width, sort_indices,
 };
 use crate::data::{CHART_TYPES, ChartAxes, ChartData, ChartType, CsvData, SortDirection};
 
@@ -51,12 +53,40 @@ const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 /// Separates clipped columns from the row numbers, where a cut-off value can read as part of the
 /// number. Counted in the content width so the last column still reaches the right edge.
 const PINNED_BORDER_WIDTH: f32 = 1.0;
+/// Rows a filter task checks between yields. Small enough that a replaced task stops soon and a
+/// single-threaded build of the planned browser version (gpui_web), which runs background tasks
+/// on the UI thread, still handles input; large enough that yielding costs little.
+const FILTER_CHUNK_ROWS: usize = 50_000;
+
+/// Decided when a task starts, so the result is shown the way it was requested even if the
+/// view changes meanwhile.
+enum ScrollTarget {
+    /// After a sort, since the old position means nothing in the new order.
+    Top,
+    /// Where each row went, to anchor the view as it is when the result arrives.
+    Keep(RowPositions),
+}
+
+/// What a filter task orders. Only the source it needs is moved into the task.
+enum RowSource {
+    /// A query changed, so every row is checked again.
+    Filter(RowFilter),
+    /// Only the sort changed, so the rows already shown are reordered.
+    Reorder(Arc<Vec<usize>>),
+}
+
+struct FilterResult {
+    indices: Vec<usize>,
+    /// Whether the rows were filtered again, rather than only the shown rows reordered.
+    is_refiltered: bool,
+    scroll: ScrollTarget,
+}
 
 #[derive(IntoElement)]
 struct TableRow {
     ix: usize,
     row_num: usize,
-    cells: Rc<Vec<String>>,
+    cells: Arc<Vec<String>>,
     col_widths: Rc<Vec<f32>>,
     row_num_width: f32,
     row_width: gpui::Pixels,
@@ -189,7 +219,8 @@ pub(crate) struct CsvrApp {
     headers: Vec<SharedString>,
     /// Original headers (not uppercased) for regex matching and column filter parsing
     raw_headers: Vec<String>,
-    rows: Vec<Rc<Vec<String>>>,
+    /// Shared with filter tasks running off the UI thread.
+    rows: Arc<Vec<Arc<Vec<String>>>>,
     col_widths: Rc<Vec<f32>>,
     numeric_columns: Vec<bool>,
     row_num_width: f32,
@@ -197,10 +228,20 @@ pub(crate) struct CsvrApp {
     visible_range: Range<usize>,
     /// The rows and top position from before the filter results became empty. GPUI resets the
     /// offset of an empty list, so this is what lets the view return when the results come back.
-    rows_before_empty: Option<(Vec<usize>, usize)>,
+    rows_before_empty: Option<(Arc<Vec<usize>>, usize)>,
     search_active: bool,
     search_query: String,
-    filtered_indices: Vec<usize>,
+    /// Replaced only when a filter task's result is applied. Held in an `Arc` so a task can
+    /// take the order it started from without copying it.
+    filtered_indices: Arc<Vec<usize>>,
+    /// Replacing this drops the running filter task, so only the latest query is applied.
+    filter_task: Option<Task<()>>,
+    /// Set by a sort. The result then scrolls to the top instead of keeping the position, even
+    /// if typing replaces the task before it finishes.
+    pending_scroll_to_top: bool,
+    /// Set when a `/` or `&` query changes, until a filtered result is shown. While it is clear,
+    /// the shown rows match the queries, so a sort only needs to reorder them.
+    needs_refilter: bool,
     sort_state: Option<(usize, SortDirection)>,
     chart_active: bool,
     metadata_visible: bool,
@@ -262,7 +303,7 @@ impl CsvrApp {
             .map(|h| SharedString::from(h.to_uppercase()))
             .collect();
         let total_rows = data.rows.len();
-        let rows = data.rows.into_iter().map(Rc::new).collect();
+        let rows = Arc::new(data.rows.into_iter().map(Arc::new).collect());
         // Find first two numeric columns for chart defaults
         let first_numeric = numeric_columns.iter().position(|&b| b).unwrap_or(0);
         let second_numeric = numeric_columns
@@ -291,7 +332,10 @@ impl CsvrApp {
             rows_before_empty: None,
             search_active: false,
             search_query: String::new(),
-            filtered_indices: (0..total_rows).collect(),
+            filtered_indices: Arc::new((0..total_rows).collect()),
+            filter_task: None,
+            pending_scroll_to_top: false,
+            needs_refilter: false,
             sort_state: None,
             chart_active: false,
             metadata_visible: has_metadata,
@@ -317,84 +361,146 @@ impl CsvrApp {
         }
     }
 
-    fn recompute_filtered_indices(&mut self) {
-        self.filtered_indices = filter_rows(&self.rows, &self.search_query);
-        // Apply `&` regex row filter
-        if !self.row_filter_pattern.is_empty() {
-            match filter_rows_regex(
-                &self.rows,
-                &self.filtered_indices,
+    /// Start filtering and sorting off the UI thread. The view keeps showing the previous
+    /// result until `apply_filter_result` replaces it, so selection, copy and export stay
+    /// consistent with what is on screen.
+    fn recompute_filtered_indices(&mut self, cx: &mut Context<Self>) {
+        let rows = self.rows.clone();
+        // A sort alone keeps the same rows, so the shown rows are reordered instead of filtered
+        // again. They are the full result for the current queries unless a query changed.
+        let source = if self.needs_refilter {
+            RowSource::Filter(RowFilter::new(
+                &self.search_query,
                 &self.row_filter_pattern,
                 self.row_filter_col,
-            ) {
-                Ok(filtered) => {
-                    self.row_filter_error = false;
-                    self.filtered_indices = filtered;
-                }
-                Err(_) => {
-                    self.row_filter_error = true;
-                    // filtered_indices keeps the `/` search-only result; `&` filter is not applied.
-                }
-            }
+            ))
         } else {
-            self.row_filter_error = false;
-        }
-        if let Some((col, direction)) = self.sort_state {
+            RowSource::Reorder(self.filtered_indices.clone())
+        };
+        let sort = self.sort_state.map(|(col, direction)| {
             let use_numeric = self.numeric_columns.get(col).copied().unwrap_or(false);
-            self.filtered_indices = sort_indices(
-                &self.rows,
-                &self.filtered_indices,
-                col,
-                use_numeric,
-                direction,
-            );
-        }
-        self.selected_cell = None;
-        self.column_stats_cache = None;
-        if self.chart_active {
-            self.recompute_chart_data();
+            (col, use_numeric, direction)
+        });
+        let scrolls_to_top = self.pending_scroll_to_top;
+        self.filter_task = Some(cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let is_refiltered = matches!(source, RowSource::Filter(_));
+                    let mut indices = match source {
+                        RowSource::Filter(filter) => {
+                            let mut indices = Vec::new();
+                            for start in (0..rows.len()).step_by(FILTER_CHUNK_ROWS) {
+                                let chunk = start..start + FILTER_CHUNK_ROWS;
+                                filter.filter_range(&rows, chunk, &mut indices);
+                                // Lets a replaced task stop here, and lets a single-threaded
+                                // build of the planned browser version handle input in between.
+                                yield_now().await;
+                            }
+                            indices
+                        }
+                        RowSource::Reorder(shown) => reorder_indices(&rows, &shown, sort),
+                    };
+                    if is_refiltered && let Some((col, use_numeric, direction)) = sort {
+                        indices = sort_indices(&rows, &indices, col, use_numeric, direction);
+                    }
+                    yield_now().await;
+                    let scroll = if scrolls_to_top {
+                        ScrollTarget::Top
+                    } else {
+                        ScrollTarget::Keep(RowPositions::new(&indices, rows.len()))
+                    };
+                    FilterResult {
+                        indices,
+                        is_refiltered,
+                        scroll,
+                    }
+                })
+                .await;
+            this.update(cx, |this, cx| this.apply_filter_result(result, cx))
+                .ok();
+        }));
+    }
+
+    /// The order and top position a result is anchored to. While the results are empty, these
+    /// come from before they became empty, since GPUI resets the offset of an empty list.
+    fn anchor_view(&self) -> (Arc<Vec<usize>>, usize) {
+        if self.filtered_indices.is_empty() {
+            self.rows_before_empty.clone().unwrap_or_default()
+        } else {
+            (self.filtered_indices.clone(), self.visible_range.start)
         }
     }
 
-    /// Re-filter after a `/` or `&` query change, keeping the view on the same rows where possible.
-    fn refilter_keeping_position(&mut self) {
-        let (previous, top) = if self.filtered_indices.is_empty() {
-            self.rows_before_empty.take().unwrap_or_default()
-        } else {
-            (
-                std::mem::take(&mut self.filtered_indices),
-                self.visible_range.start,
-            )
-        };
+    /// Show a finished filter result, keeping the view on the same rows where possible
+    /// (or scrolling to the top after a sort). Anchors to the view as it is now, which may have
+    /// scrolled or changed its selection while the task ran.
+    fn apply_filter_result(&mut self, result: FilterResult, cx: &mut Context<Self>) {
+        let FilterResult {
+            indices,
+            is_refiltered,
+            scroll,
+        } = result;
+        // This runs inside the task itself, so detach rather than drop it; either way it ends here.
+        if let Some(task) = self.filter_task.take() {
+            task.detach();
+        }
+        let (previous, top) = self.anchor_view();
         let selected = self
             .selected_cell
             .and_then(|(row, col)| Some((*previous.get(row)?, col)));
 
-        self.recompute_filtered_indices();
+        self.pending_scroll_to_top = false;
+        if is_refiltered {
+            self.needs_refilter = false;
+        }
+        self.rows_before_empty = None;
+        self.filtered_indices = Arc::new(indices);
+        self.selected_cell = None;
+        self.column_stats_cache = None;
 
-        if let Some((row, col)) = selected
-            && let Some(pos) = self.filtered_indices.iter().position(|&r| r == row)
-        {
-            self.selected_cell = Some((pos, col));
-            self.recompute_column_stats();
+        match scroll {
+            ScrollTarget::Top => {
+                self.scroll_handle
+                    .scroll_to_item(0, gpui::ScrollStrategy::Top);
+                // The list only updates this when it renders, and another key can arrive before that.
+                self.visible_range = 0..self.visible_range.len();
+            }
+            ScrollTarget::Keep(positions) => {
+                if let Some((row, col)) = selected
+                    && let Some(pos) = positions.get(row)
+                {
+                    self.selected_cell = Some((pos, col));
+                    self.recompute_column_stats();
+                }
+                if let Some(pos) = anchored_position(&previous, &positions, top) {
+                    self.scroll_handle
+                        .scroll_to_item_strict(pos, gpui::ScrollStrategy::Top);
+                    self.visible_range = pos..pos + self.visible_range.len();
+                }
+                if self.filtered_indices.is_empty() {
+                    self.rows_before_empty = Some((previous, top));
+                }
+            }
         }
-        if let Some(pos) = anchored_position(&previous, &self.filtered_indices, top) {
-            self.scroll_handle
-                .scroll_to_item_strict(pos, gpui::ScrollStrategy::Top);
-            // The list only updates this when it renders, and another key can arrive before that.
-            self.visible_range = pos..pos + self.visible_range.len();
+        if self.chart_active {
+            self.recompute_chart_data();
         }
-        if self.filtered_indices.is_empty() {
-            self.rows_before_empty = Some((previous, top));
-        }
+        cx.notify();
     }
 
-    fn set_search_query(&mut self, query: String) {
+    /// Whether a filter task is still running, so the shown rows may not match the queries yet.
+    fn is_filtering(&self) -> bool {
+        self.filter_task.is_some()
+    }
+
+    fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
         self.search_query = query;
-        self.refilter_keeping_position();
+        self.needs_refilter = true;
+        self.recompute_filtered_indices(cx);
     }
 
-    fn toggle_sort(&mut self, col: usize) {
+    fn toggle_sort(&mut self, col: usize, cx: &mut Context<Self>) {
         self.sort_state = match self.sort_state {
             Some((c, SortDirection::Ascending)) if c == col => {
                 Some((col, SortDirection::Descending))
@@ -404,9 +510,8 @@ impl CsvrApp {
         };
         // The saved order no longer matches the sorted rows.
         self.rows_before_empty = None;
-        self.recompute_filtered_indices();
-        self.scroll_handle
-            .scroll_to_item(0, gpui::ScrollStrategy::Top);
+        self.pending_scroll_to_top = true;
+        self.recompute_filtered_indices(cx);
     }
 
     fn toggle_search(&mut self) {
@@ -623,7 +728,20 @@ impl CsvrApp {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
+    /// Exports would otherwise copy the rows from before the latest query, which the user is
+    /// likely to take for the filtered result.
+    fn is_ready_to_export(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.is_filtering() {
+            self.show_status_message("Still filtering. Export again when it finishes", cx);
+            return false;
+        }
+        true
+    }
+
     fn export_json(&mut self, cx: &mut Context<Self>) {
+        if !self.is_ready_to_export(cx) {
+            return;
+        }
         let text = export_json(
             &self.raw_headers,
             &self.rows,
@@ -634,6 +752,9 @@ impl CsvrApp {
     }
 
     fn export_markdown(&mut self, cx: &mut Context<Self>) {
+        if !self.is_ready_to_export(cx) {
+            return;
+        }
         let text = export_markdown(
             &self.raw_headers,
             &self.rows,
@@ -763,23 +884,20 @@ impl CsvrApp {
         if self.row_filter_active {
             // Revalidate error flag without clearing selection or re-scanning rows.
             // Only check if the pattern compiles — no need to run it against all rows.
-            if !self.row_filter_pattern.is_empty() {
-                self.row_filter_error = RegexBuilder::new(&self.row_filter_pattern)
-                    .case_insensitive(true)
-                    .build()
-                    .is_err();
-            } else {
-                self.row_filter_error = false;
-            }
+            self.row_filter_error = !RowFilter::is_valid_pattern(&self.row_filter_pattern);
         }
     }
 
-    fn set_row_filter_query(&mut self, query: String) {
+    fn set_row_filter_query(&mut self, query: String, cx: &mut Context<Self>) {
         let (col, pattern) = parse_column_filter(&query, &self.raw_headers);
         self.row_filter_query = query;
         self.row_filter_col = col;
+        // Checked here rather than with the result, so the error shows as soon as it is typed
+        // and a result landing after the bar closes cannot set it again.
+        self.row_filter_error = !RowFilter::is_valid_pattern(&pattern);
         self.row_filter_pattern = pattern;
-        self.refilter_keeping_position();
+        self.needs_refilter = true;
+        self.recompute_filtered_indices(cx);
     }
 
     fn close_row_filter(&mut self) {
@@ -817,6 +935,12 @@ impl Render for CsvrApp {
         let row_width = px(content_width.max(viewport_width));
         let filtered_count = self.filtered_indices.len();
         let total_count = self.rows.len();
+        // The count is from the last result, so say when a newer one is still on its way.
+        let rows_text = if self.is_filtering() {
+            format!("{} / {} rows (filtering...)", filtered_count, total_count)
+        } else {
+            format!("{} / {} rows", filtered_count, total_count)
+        };
 
         div()
             .track_focus(&self.focus_handle(cx))
@@ -949,12 +1073,12 @@ impl Render for CsvrApp {
                     } else if keystroke.key == "backspace" {
                         let mut q = this.row_filter_query.clone();
                         q.pop();
-                        this.set_row_filter_query(q);
+                        this.set_row_filter_query(q, cx);
                         cx.notify();
                     } else if let Some(ch) = &keystroke.key_char {
                         let mut q = this.row_filter_query.clone();
                         q.push_str(ch);
-                        this.set_row_filter_query(q);
+                        this.set_row_filter_query(q, cx);
                         cx.notify();
                     }
                     return;
@@ -971,12 +1095,12 @@ impl Render for CsvrApp {
                     } else if keystroke.key == "backspace" {
                         let mut q = this.search_query.clone();
                         q.pop();
-                        this.set_search_query(q);
+                        this.set_search_query(q, cx);
                         cx.notify();
                     } else if let Some(ch) = &keystroke.key_char {
                         let mut q = this.search_query.clone();
                         q.push_str(ch);
-                        this.set_search_query(q);
+                        this.set_search_query(q, cx);
                         cx.notify();
                     }
                     return;
@@ -1056,7 +1180,7 @@ impl Render for CsvrApp {
                                 .cursor_pointer()
                                 .on_click(move |_event, _window, cx| {
                                     entity.update(cx, |this, cx| {
-                                        this.toggle_sort(col_idx);
+                                        this.toggle_sort(col_idx, cx);
                                         cx.notify();
                                     });
                                 })
@@ -1279,7 +1403,7 @@ impl Render for CsvrApp {
                                 .child(if self.row_filter_error {
                                     "invalid regex".to_string()
                                 } else {
-                                    format!("{} / {} rows", filtered_count, total_count)
+                                    rows_text.clone()
                                 }),
                         ),
                 )
@@ -1319,7 +1443,7 @@ impl Render for CsvrApp {
                             div()
                                 .text_color(rgb(TEXT_SUBTEXT))
                                 .text_xs()
-                                .child(format!("{} / {} rows", filtered_count, total_count)),
+                                .child(rows_text.clone()),
                         ),
                 )
             })
@@ -1595,7 +1719,7 @@ impl Render for CsvrApp {
                         let vis_cols = self.visible_col_indices.len();
                         let total_cols = self.raw_headers.len();
                         let pinned = self.pinned_col_count.min(vis_cols);
-                        let mut parts = vec![format!("{} / {} rows", filtered_count, total_count)];
+                        let mut parts = vec![rows_text.clone()];
                         if vis_cols < total_cols {
                             parts.push(format!("{} / {} cols", vis_cols, total_cols));
                         }

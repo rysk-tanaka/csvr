@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 
 use gpui::{App, AppContext, Bounds, KeyBinding, QuitMode, WindowBounds, WindowOptions, px, size};
 
-use csvr_core::data::{CsvData, decode_to_utf8};
+use csvr_core::data::{CsvData, DecodedInput, decode_to_utf8};
 
 use crate::app::{
     CopySelection, CsvrApp, DismissSearch, ExportJson, ExportMarkdown, Quit, ToggleChart,
@@ -18,6 +18,14 @@ fn print_usage_and_exit(msg: &str) -> ! {
     eprintln!("Usage: csvr <file.csv|file.xlsx|file.xls>");
     eprintln!("   or: cat file.csv | csvr");
     std::process::exit(1);
+}
+
+/// The guess can be wrong, so leave a clue on stderr. It stays out of the status bar because
+/// correctly decoded legacy files would otherwise show a warning every time.
+fn report_guessed_encoding(decoded: &DecodedInput) {
+    if let Some(name) = decoded.decoded_as {
+        eprintln!("Warning: Input is not valid UTF-8; decoded as {name}");
+    }
 }
 
 fn load_csv() -> CsvData {
@@ -50,6 +58,7 @@ fn load_csv() -> CsvData {
         let reader: Box<dyn std::io::Read> = match decode_to_utf8(&bytes) {
             Some(Ok(decoded)) => {
                 drop(bytes);
+                report_guessed_encoding(&decoded);
                 decode_warning = decoded.warning;
                 Box::new(Cursor::new(decoded.bytes))
             }
@@ -84,7 +93,10 @@ fn load_csv() -> CsvData {
             std::process::exit(1);
         });
         let (transcoded, decode_warning) = match decode_to_utf8(&bytes) {
-            Some(Ok(decoded)) => (decoded.bytes, decoded.warning),
+            Some(Ok(decoded)) => {
+                report_guessed_encoding(&decoded);
+                (decoded.bytes, decoded.warning)
+            }
             Some(Err(e)) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);

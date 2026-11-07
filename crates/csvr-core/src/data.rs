@@ -398,13 +398,16 @@ impl CsvData {
 pub struct DecodedInput {
     pub bytes: Vec<u8>,
     pub warning: Option<String>,
+    /// Name of the guessed encoding, set only when input that is not valid UTF-8 was decoded with it.
+    /// Returned instead of printed, because the core cannot know where the caller shows messages.
+    pub decoded_as: Option<&'static str>,
 }
 
 /// Detect encoding and decode bytes to UTF-8.
 /// Returns `None` if no conversion is needed: valid UTF-8 that is not ISO-2022-JP.
 /// Returns `Some(Ok(decoded))` on successful transcoding. Input that looks like damaged UTF-8
 /// (see `is_damaged_utf8`) has its invalid bytes replaced with U+FFFD. `decoded.warning` is set
-/// only for that replacement. A guessed encoding for non-UTF-8 input is printed to stderr instead.
+/// only for that replacement. A guessed encoding for non-UTF-8 input goes to `decoded.decoded_as`.
 /// Returns `Some(Err(msg))` if the detected encoding cannot losslessly decode the input.
 pub fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String>> {
     let is_valid_utf8 = std::str::from_utf8(bytes).is_ok();
@@ -418,6 +421,7 @@ pub fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String>> {
         return Some(Ok(DecodedInput {
             bytes: String::from_utf8_lossy(bytes).into_owned().into_bytes(),
             warning: Some("Input contains invalid UTF-8 bytes; replaced with U+FFFD".to_string()),
+            decoded_as: None,
         }));
     }
 
@@ -436,17 +440,10 @@ pub fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String>> {
             actual_encoding.name()
         )));
     }
-    if !is_valid_utf8 {
-        // The guess can be wrong, so leave a clue on stderr. It stays out of the status bar because
-        // correctly decoded legacy files would otherwise show a warning every time.
-        eprintln!(
-            "Warning: Input is not valid UTF-8; decoded as {}",
-            actual_encoding.name()
-        );
-    }
     Some(Ok(DecodedInput {
         bytes: decoded.into_owned().into_bytes(),
         warning: None,
+        decoded_as: (!is_valid_utf8).then(|| actual_encoding.name()),
     }))
 }
 
@@ -743,17 +740,19 @@ mod tests {
         let decoded = std::str::from_utf8(&result.bytes).unwrap();
         assert!(decoded.contains("名前"));
         assert!(result.warning.is_none());
+        assert_eq!(result.decoded_as, Some("Shift_JIS"));
     }
 
     #[test]
     fn decode_damaged_utf8_warns_about_replacement() {
         let bytes = [b"\xEF\xBB\xBFa,b\n1,".as_slice(), b"\xFF\n"].concat();
-        let warning = decode_to_utf8(&bytes)
+        let decoded = decode_to_utf8(&bytes)
             .expect("should need conversion")
-            .expect("should decode without errors")
-            .warning
-            .expect("replacement should warn");
+            .expect("should decode without errors");
+        let warning = decoded.warning.expect("replacement should warn");
         assert!(warning.contains("U+FFFD"), "{warning}");
+        // Treated as UTF-8, so no other encoding was guessed.
+        assert_eq!(decoded.decoded_as, None);
     }
 
     #[test]
@@ -763,6 +762,8 @@ mod tests {
             .expect("should need conversion")
             .expect("should decode without errors");
         assert!(decoded.warning.is_none());
+        // ISO-2022-JP is also valid UTF-8, so it is not reported as a guess.
+        assert_eq!(decoded.decoded_as, None);
     }
 
     // --- warnings ---

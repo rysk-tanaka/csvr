@@ -7,7 +7,6 @@ use std::rc::Rc;
 
 use gpui::{App, AppContext, AsyncApp, WindowHandle, WindowOptions};
 use gpui_web::{CanvasFontFallback, WebBackendPreference, WebPlatform};
-use ttf_parser::Weight;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::closure::Closure;
 
@@ -28,25 +27,24 @@ const SAMPLE_CSV: &str = "\
 struct FontFile {
     url: &'static str,
     /// Subresource Integrity hash. The browser rejects the response if the content differs, so a
-    /// compromised CDN cannot hand the page a different font.
+    /// compromised CDN cannot hand the page a different font. It also stands in for checking the
+    /// font: `add_fonts` reports success even for bytes it cannot parse, and these bytes are the
+    /// files that were checked when the hashes were taken.
     integrity: &'static str,
-    weight: Weight,
 }
 
 /// IBM Plex Sans JP Regular and SemiBold, the Japanese edition of the bundled IBM Plex Sans. It also
-/// has the symbols the bundled font lacks (▲▼, full-width letters, ①, ㈱, ...). The npm package
+/// has the symbols the bundled font lacks (full-width letters, ①, ㈱, ▲, ...). The npm package
 /// only ships WOFF and WOFF2, which cosmic-text cannot read, so the TTFs come from GitHub. The URLs
 /// are pinned to the commit of the `@ibm/plex-sans-jp@3.0.0` tag, and the content to its hash.
 const IBM_PLEX_SANS_JP: [FontFile; 2] = [
     FontFile {
         url: "https://cdn.jsdelivr.net/gh/IBM/plex@89cba80dad75561262e758f4b6ddd474c5119796/packages/plex-sans-jp/fonts/complete/ttf/unhinted/IBMPlexSansJP-Regular.ttf",
         integrity: "sha384-/yQZjwaTcpaqocYFEcsa32pkb1RuXBjNCLOFAOqOLZ75hLANiYYjiKWMYS7ZOX/4",
-        weight: Weight::Normal,
     },
     FontFile {
         url: "https://cdn.jsdelivr.net/gh/IBM/plex@89cba80dad75561262e758f4b6ddd474c5119796/packages/plex-sans-jp/fonts/complete/ttf/unhinted/IBMPlexSansJP-SemiBold.ttf",
         integrity: "sha384-HsmSeI1bT3Exy/NcxEvE9gmfB11qUzPrmClQYUGzdkCvMIb0Hr9ct1l2VEhYzjua",
-        weight: Weight::SemiBold,
     },
 ];
 
@@ -118,22 +116,19 @@ fn load_japanese_font_on_missing_glyphs(cx: &mut App) {
 }
 
 async fn load_japanese_font(cx: &mut AsyncApp) {
-    let mut fonts = Vec::with_capacity(IBM_PLEX_SANS_JP.len());
-    for font in &IBM_PLEX_SANS_JP {
-        let url = font.url;
-        let checked = fetch_bytes(url, font.integrity)
-            .await
-            .and_then(|bytes| check_font(&bytes, font.weight).map(|()| bytes));
-        match checked {
-            Ok(bytes) => fonts.push(Cow::Owned(bytes)),
-            // Adding only one weight would mix typefaces between the header and the body.
-            Err(e) => {
-                log::error!("failed to load '{url}': {e}");
-                return;
-            }
+    let [regular, semibold] = &IBM_PLEX_SANS_JP;
+    // Both at once, so the tofu stays on screen for one download instead of two. If either fails,
+    // neither is added: adding only one weight would mix typefaces between the header and the body.
+    let fonts = futures_lite::future::try_zip(fetch_font(regular), fetch_font(semibold)).await;
+    let (regular, semibold) = match fonts {
+        Ok(fonts) => fonts,
+        Err(e) => {
+            log::error!("{e}");
+            return;
         }
-    }
+    };
     cx.update(|cx| {
+        let fonts = vec![Cow::Owned(regular), Cow::Owned(semibold)];
         if let Err(e) = cx.text_system().add_fonts(fonts) {
             log::error!("failed to add IBM Plex Sans JP: {e:#}");
             return;
@@ -142,6 +137,12 @@ async fn load_japanese_font(cx: &mut AsyncApp) {
         cx.refresh_windows();
         log::info!("loaded IBM Plex Sans JP");
     });
+}
+
+async fn fetch_font(font: &FontFile) -> Result<Vec<u8>, String> {
+    fetch_bytes(font.url, font.integrity)
+        .await
+        .map_err(|e| format!("failed to load '{}': {e}", font.url))
 }
 
 async fn fetch_bytes(url: &str, integrity: &str) -> Result<Vec<u8>, String> {
@@ -171,23 +172,6 @@ fn js_error(value: &wasm_bindgen::JsValue) -> String {
         Some(error) => String::from(error.message()),
         None => format!("{value:?}"),
     }
-}
-
-/// `add_fonts` reports success even when it cannot parse a font, so the bytes are checked here
-/// before they are added.
-fn check_font(bytes: &[u8], weight: Weight) -> Result<(), String> {
-    let face = ttf_parser::Face::parse(bytes, 0).map_err(|e| format!("not a font: {e}"))?;
-    if face.weight() != weight {
-        return Err(format!(
-            "weight is {}, expected {}",
-            face.weight().to_number(),
-            weight.to_number()
-        ));
-    }
-    if face.glyph_index('▲').is_none() {
-        return Err("the font has no ▲".to_string());
-    }
-    Ok(())
 }
 
 /// gpui_web only stops the browser from opening dropped files; it does not hand them to the app,

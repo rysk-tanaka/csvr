@@ -1421,7 +1421,8 @@ impl Render for CsvrApp {
                                 .cloned()
                                 .unwrap_or_else(|| "".into());
                             // Arrows rather than ▲▼: the browser build's bundled IBM Plex Sans has
-                            // them, so sorting does not make it download the Japanese font.
+                            // them, so sorting does not make it download the Japanese font. The
+                            // native build uses the same arrows so both builds look alike.
                             let indicator: SharedString = match self.sort_state {
                                 Some((c, SortDirection::Ascending)) if c == col_idx => "↑".into(),
                                 Some((c, SortDirection::Descending)) if c == col_idx => "↓".into(),

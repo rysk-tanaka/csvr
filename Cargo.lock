@@ -930,7 +930,6 @@ dependencies = [
  "log",
  "objc",
  "regex",
- "ttf-parser",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",

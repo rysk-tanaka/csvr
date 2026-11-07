@@ -62,7 +62,7 @@ src/
 
 入力の流れ: `load_csv()`（CLI引数 or stdin） → xlsx/xls なら開いたファイルを `CsvData::from_spreadsheet` に渡す、それ以外は `decode_to_utf8` → `CsvData::from_reader` → `CsvrApp::new(data, cx)` → GPUI ウィンドウ
 
-ブラウザ版の流れ: `web::run()` → `WebPlatform`（シングルスレッド、日本語は `CanvasFontFallback::EmojiAndCjk` でブラウザのフォントに描かせる）→ IBM Plex Sans（`assets/fonts/ibm-plex-sans`、OFL）を `add_fonts` → `on_missing_glyphs` で足りない字を待つ → サンプル CSV で `CsvrApp` → `document` の `drop` で受けたファイルを読み、`CsvrApp::new` で置き換える。gpui_web はドロップされたファイルをアプリに渡さないので、`web-sys` で自分で受け取る。キーは `key_bindings` を `cmd` と `ctrl` の両方で割り当てる（web の `cmd` はどの OS でも Meta キーのため）。どのフォントにもない字が初めて出たら、IBM Plex Sans JP（Regular と SemiBold）を jsDelivr から取り、`ttf-parser` で確かめてから `add_fonts` し、`refresh_windows` で描き直す（`add_fonts` は読めないフォントでも成功を返すため）
+ブラウザ版の流れ: `web::run()` → `WebPlatform`（シングルスレッド、日本語は `CanvasFontFallback::EmojiAndCjk` でブラウザのフォントに描かせる）→ IBM Plex Sans（`assets/fonts/ibm-plex-sans`、OFL）を `add_fonts` → `on_missing_glyphs` で足りない字を待つ → サンプル CSV で `CsvrApp` → `document` の `drop` で受けたファイルを読み、`CsvrApp::new` で置き換える。gpui_web はドロップされたファイルをアプリに渡さないので、`web-sys` で自分で受け取る。キーは `key_bindings` を `cmd` と `ctrl` の両方で割り当てる（web の `cmd` はどの OS でも Meta キーのため）。どのフォントにもない字が初めて出たら、IBM Plex Sans JP（Regular と SemiBold）を jsDelivr から 2 つ同時に取り、`add_fonts` して `refresh_windows` で描き直す（`add_fonts` は読めないフォントでも成功を返すが、中身は SRI のハッシュで固定しているので確かめない）
 
 `set_dock_icon()` は `assets/icon.png` を `include_bytes!` で埋め込み、`objc` クレートで `NSApplication.setApplicationIconImage:` を呼び出して Dock アイコンを設定する。アイコンは Lucide Icons の file-spreadsheet（ISC License、帰属表示は `assets/LICENSE`）を Catppuccin Mocha カラーで調整したもの
 

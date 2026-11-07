@@ -4,20 +4,21 @@ use futures_lite::future::yield_now;
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, Font, Hsla, KeyBinding, KeyDownEvent, Keystroke,
-    ListHorizontalSizingBehavior, Pixels, Rems, Render, SharedString, Task, TextAlign, TextRun,
-    UTF16Selection, UnderlineStyle, UniformListScrollHandle, Window, actions, canvas, div, fill,
-    point, prelude::*, px, rgb, uniform_list,
+    EntityInputHandler, FocusHandle, Focusable, Font, FontWeight, Hsla, KeyBinding, KeyDownEvent,
+    Keystroke, ListHorizontalSizingBehavior, Pixels, Rems, Render, SharedString, Task, TextAlign,
+    TextRun, UTF16Selection, UnderlineStyle, UniformListScrollHandle, Window, actions, canvas, div,
+    fill, point, prelude::*, px, rgb, uniform_list,
 };
 use regex::RegexBuilder;
 
 use csvr_core::compute::{
-    ColumnStats, RowFilter, RowPositions, TextInputState, anchored_position, caret_scroll_offset,
-    chart_legend, clamp_h_offset, compute_column_stats, compute_column_widths,
+    ColumnStats, MAX_COL_WIDTH, RowFilter, RowPositions, TextInputState, anchored_position,
+    caret_scroll_offset, chart_legend, clamp_h_offset, compute_column_stats, compute_column_widths,
     compute_histogram_bins, compute_numeric_columns, copied_status_message, downsample,
     export_json, export_markdown, extract_column_values, extract_scatter_pairs,
-    filter_columns_by_regex, h_offset_to_reveal, histogram_axes, measurable_by_pairs, pairs_axes,
-    parse_column_filter, points_axes, reorder_indices, row_number_col_width, sort_indices,
+    filter_columns_by_regex, h_offset_to_reveal, histogram_axes, measurable_by_pairs,
+    pair_needs_shaping, pairs_axes, parse_column_filter, points_axes, reorder_indices,
+    row_number_col_width, sort_indices,
 };
 use csvr_core::data::{
     CHART_TYPES, ChartAxes, ChartData, ChartType, CsvData, SortDirection, Table,
@@ -102,8 +103,12 @@ const CARET_WIDTH: f32 = 1.0;
 const TABLE_FONT_FAMILY: &str = ".SystemUIFont";
 const CELL_TEXT_SIZE: Rems = Rems(0.875);
 const HEADER_TEXT_SIZE: Rems = Rems(0.75);
-/// The `ml_0p5` gap before the sort indicator.
+const HEADER_FONT_WEIGHT: FontWeight = FontWeight::BOLD;
+/// The gap before the sort indicator (`ml_0p5`).
 const SORT_INDICATOR_GAP: Rems = Rems(0.125);
+/// Characters of a long line shaped first: a line that long is usually wider than any column
+/// can be, and the prefix settles that without shaping (and caching the layout of) the rest.
+const SHAPED_PREFIX_CHARS: usize = 256;
 /// Rows a filter task checks between yields. Small enough that a replaced task stops soon and a
 /// single-threaded browser build (gpui_web, `src/web.rs`), which runs background tasks on the UI
 /// thread, still handles input; large enough that yielding costs little.
@@ -1253,7 +1258,10 @@ impl EntityInputHandler for CsvrApp {
 fn measure_columns(window: &Window, rows: &Table, headers: &[SharedString]) -> (Vec<f32>, f32) {
     let rem_size = window.rem_size();
     let cell_size = CELL_TEXT_SIZE.to_pixels(rem_size);
-    let header_font = gpui::font(TABLE_FONT_FAMILY).bold();
+    let header_font = Font {
+        weight: HEADER_FONT_WEIGHT,
+        ..gpui::font(TABLE_FONT_FAMILY)
+    };
     let header_size = HEADER_TEXT_SIZE.to_pixels(rem_size);
     // Always counted, so sorting a column does not change its width and shift the table.
     let indicator_width = SORT_INDICATOR_GAP.to_pixels(rem_size).as_f32()
@@ -1277,7 +1285,8 @@ fn measure_columns(window: &Window, rows: &Table, headers: &[SharedString]) -> (
 
 /// Measures cell lines without shaping most of them: a line of the characters
 /// `measurable_by_pairs` accepts is as wide as its characters plus an adjustment for each
-/// adjacent pair (kerning, and the space CoreText adds between CJK and Latin). Characters and
+/// adjacent pair (kerning, and the space CoreText adds between CJK and Latin;
+/// `pair_needs_shaping` skips the kanji and kana pairs, which have none). Characters and
 /// pairs repeat across cells, so each is shaped once. Shaping each line whole takes about
 /// 10-40µs, which adds up to a second on a file with hundreds of columns.
 struct LineMeasure<'a> {
@@ -1299,13 +1308,18 @@ impl<'a> LineMeasure<'a> {
         }
     }
 
+    /// The width of `line`, or at least `MAX_COL_WIDTH` when it is wider: past that the column
+    /// is as wide as it gets, so the rest is not measured.
     fn width(&mut self, line: &str) -> f32 {
         if !measurable_by_pairs(line) {
-            return self.shaped_width(line);
+            return self.shaped_line_width(line);
         }
         let mut width = 0.0;
         let mut previous = None;
         for c in line.chars() {
+            if width >= MAX_COL_WIDTH {
+                break;
+            }
             width += self.char_width(c);
             if let Some(previous) = previous {
                 width += self.pair_adjustment(previous, c);
@@ -1325,6 +1339,9 @@ impl<'a> LineMeasure<'a> {
     }
 
     fn pair_adjustment(&mut self, a: char, b: char) -> f32 {
+        if !pair_needs_shaping(a, b) {
+            return 0.0;
+        }
         if let Some(&adjustment) = self.pair_adjustments.get(&(a, b)) {
             return adjustment;
         }
@@ -1332,6 +1349,16 @@ impl<'a> LineMeasure<'a> {
         let adjustment = self.shaped_width(&pair) - self.char_width(a) - self.char_width(b);
         self.pair_adjustments.insert((a, b), adjustment);
         adjustment
+    }
+
+    fn shaped_line_width(&self, line: &str) -> f32 {
+        if let Some((prefix_end, _)) = line.char_indices().nth(SHAPED_PREFIX_CHARS) {
+            let prefix_width = self.shaped_width(&line[..prefix_end]);
+            if prefix_width >= MAX_COL_WIDTH {
+                return prefix_width;
+            }
+        }
+        self.shaped_width(line)
     }
 
     fn shaped_width(&self, text: &str) -> f32 {
@@ -1533,7 +1560,7 @@ impl Render for CsvrApp {
                     .bg(rgb(HEADER_BG))
                     .text_color(rgb(TEXT_SUBTEXT))
                     .text_size(HEADER_TEXT_SIZE)
-                    .font_weight(gpui::FontWeight::BOLD)
+                    .font_weight(HEADER_FONT_WEIGHT)
                     // Inner row: pinned section + scrollable section
                     .child({
                         let pinned_count =
@@ -1579,7 +1606,12 @@ impl Render for CsvrApp {
                                         .child(label),
                                 )
                                 .when(has_indicator, |el| {
-                                    el.child(div().flex_shrink_0().ml_0p5().child(indicator))
+                                    el.child(
+                                        div()
+                                            .flex_shrink_0()
+                                            .ml(SORT_INDICATOR_GAP)
+                                            .child(indicator),
+                                    )
                                 })
                         };
 

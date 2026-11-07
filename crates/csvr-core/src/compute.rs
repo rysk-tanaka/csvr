@@ -6,7 +6,7 @@ use regex::{Regex, RegexBuilder};
 use crate::data::{ChartAxes, ChartAxis, ChartType, Row, SortDirection, Table};
 
 pub(crate) const MIN_COL_WIDTH: f32 = 50.0;
-pub(crate) const MAX_COL_WIDTH: f32 = 400.0;
+pub const MAX_COL_WIDTH: f32 = 400.0;
 pub(crate) const COL_PADDING: f32 = 24.0;
 pub(crate) const ROW_NUM_WIDTH: f32 = 16.0;
 /// Rows the column widths look at. Shaping every cell of a large file would hold up opening it.
@@ -51,11 +51,16 @@ fn lines(text: &str) -> impl Iterator<Item = &str> {
 
 /// Whether the app may measure a line from its characters and adjacent pairs instead of shaping
 /// it whole (see `LineMeasure` in the app). Only characters that shaping does not join with
-/// their neighbors qualify: Latin, symbols, kana, CJK ideographs and Hangul syllables. A line
-/// with any other character is shaped whole, because the result is not decided by pairs: a VS16
-/// such as ©️ draws the character before as an emoji (about twice as wide), a ZWJ sequence draws
-/// as one emoji, combining marks draw on the letter before, and scripts such as Arabic change
-/// shape by context.
+/// their neighbors qualify: Latin, symbols, kanji, kana, and fullwidth and halfwidth forms of
+/// letters. A line with any
+/// other character is shaped whole, because the result is not decided by pairs: a VS16 such as
+/// ©️ draws the character before as an emoji (about twice as wide), a ZWJ sequence draws as one
+/// emoji, combining marks draw on the letter before, and scripts such as Arabic change shape by
+/// context. CJK punctuation (、。「」（）) is shaped whole too: CoreText spaces it by what
+/// surrounds it, so a pair measured alone can differ from the same pair in a line (by 28px over
+/// one line of Japanese prose), and measuring every pair with it is slower than shaping the
+/// lines whole. So is Hangul: next to kanji and kana it changed the width of the line by up to
+/// 10px more than its pairs did.
 pub fn measurable_by_pairs(line: &str) -> bool {
     line.chars().all(|c| {
         matches!(c,
@@ -63,23 +68,49 @@ pub fn measurable_by_pairs(line: &str) -> bool {
             // Latin-1 and Latin Extended, without the soft hyphen, which is invisible.
             | '\u{A0}'..='\u{AC}'
             | '\u{AE}'..='\u{24F}'
-            // General Punctuation, without the zero-width, bidi and invisible characters.
+            // General Punctuation, without the spaces, the line and paragraph separators, and
+            // the zero-width, bidi and invisible characters (U+2000-200F, U+2028-202F,
+            // U+205F-206F).
             | '\u{2010}'..='\u{2027}'
             | '\u{2030}'..='\u{205E}'
             // Currency signs, then letterlike symbols to Miscellaneous Symbols and Arrows
             // (arrows, math, box drawing, shapes, ①, ★).
             | '\u{20A0}'..='\u{20C0}'
             | '\u{2100}'..='\u{2BFF}'
-            // CJK punctuation and kana, without the combining tone and voicing marks.
-            | '\u{3000}'..='\u{3029}'
-            | '\u{3030}'..='\u{3098}'
-            | '\u{309B}'..='\u{30FF}'
-            | '\u{3400}'..='\u{4DBF}'
-            | '\u{4E00}'..='\u{9FFF}'
-            | '\u{AC00}'..='\u{D7A3}'
-            // Fullwidth forms and halfwidth kana.
-            | '\u{FF01}'..='\u{FFEF}')
+            // Fullwidth digits and Latin letters, and halfwidth katakana. CoreText spaces some
+            // of them from kanji and kana (halfwidth katakana by 1.75px, as it does Latin), so
+            // their pairs are shaped.
+            | '\u{FF10}'..='\u{FF19}'
+            | '\u{FF21}'..='\u{FF3A}'
+            | '\u{FF41}'..='\u{FF5A}'
+            | '\u{FF66}'..='\u{FF9F}'
+        ) || is_cjk_letter(c)
     })
+}
+
+/// Whether the app has to shape a pair of adjacent characters to find how much setting them
+/// side by side changes the width. In CoreText kanji and kana keep their widths next to each other,
+/// so those pairs are not shaped; a font that kerns them only narrows them, so the column is at
+/// most a little wide. Skipping them matters because Japanese text has so many distinct pairs
+/// that shaping each would be slower than shaping the lines whole. Pairs with any other
+/// character are shaped (kerning, and the space CoreText adds between CJK and Latin).
+pub fn pair_needs_shaping(a: char, b: char) -> bool {
+    !(is_cjk_letter(a) && is_cjk_letter(b))
+}
+
+/// Kanji and kana, whose pairs CoreText sets without adjusting.
+fn is_cjk_letter(c: char) -> bool {
+    matches!(c,
+        // 々 〆 〇
+        '\u{3005}'..='\u{3007}'
+        // Hiragana and katakana with their iteration and prolonged sound marks, without the
+        // combining marks, ゠ and ・.
+        | '\u{3041}'..='\u{3096}'
+        | '\u{309D}'..='\u{309F}'
+        | '\u{30A1}'..='\u{30FA}'
+        | '\u{30FC}'..='\u{30FF}'
+        | '\u{3400}'..='\u{4DBF}'
+        | '\u{4E00}'..='\u{9FFF}')
 }
 
 /// `digit_width` is the width of the widest digit in the row number font.
@@ -1207,8 +1238,8 @@ mod tests {
         assert!(measurable_by_pairs(""));
         assert!(measurable_by_pairs("It’s “great” — €1,200 × 2…"));
         assert!(measurable_by_pairs("café ñ"));
-        assert!(measurable_by_pairs("品名（ＡＢＣ）①※★ ｶﾞ が"));
-        assert!(measurable_by_pairs("한국어"));
+        assert!(measurable_by_pairs("品名ＡＢＣ①※★ ｶﾞ が"));
+        assert!(measurable_by_pairs("ＡＢＣ１２３"));
     }
 
     #[test]
@@ -1220,6 +1251,29 @@ mod tests {
         assert!(!measurable_by_pairs("مرحبا"));
         assert!(!measurable_by_pairs("a\u{AD}b"));
         assert!(!measurable_by_pairs("a\tb"));
+        assert!(!measurable_by_pairs("品名（ＡＢＣ）"));
+        assert!(!measurable_by_pairs("はい、そうです。"));
+        assert!(!measurable_by_pairs("한국어"));
+    }
+
+    // --- pair_needs_shaping ---
+
+    #[test]
+    fn pair_needs_shaping_skips_cjk_letters() {
+        for pair in ["日本", "テス", "ひら", "日テ", "々日", "ー日"] {
+            let mut chars = pair.chars();
+            let (a, b) = (chars.next().unwrap(), chars.next().unwrap());
+            assert!(!pair_needs_shaping(a, b), "{pair}");
+        }
+    }
+
+    #[test]
+    fn pair_needs_shaping_for_latin() {
+        for pair in ["AV", "a日", "日a", "a ", "ＡＢ", "日１", "ﾃｽ", "日ｶ"] {
+            let mut chars = pair.chars();
+            let (a, b) = (chars.next().unwrap(), chars.next().unwrap());
+            assert!(pair_needs_shaping(a, b), "{pair}");
+        }
     }
 
     // --- row_number_col_width ---

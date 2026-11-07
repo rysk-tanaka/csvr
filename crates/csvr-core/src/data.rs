@@ -196,7 +196,7 @@ pub struct CsvData {
     pub rows: Table,
     /// Original header row + rows before the promoted header (metadata section in files with mixed formats)
     pub metadata: Vec<Vec<String>>,
-    /// Problems found while loading the input, shown in the status bar and on stderr
+    /// Problems found while loading the input, for the caller to show (the core does not print them)
     pub warnings: Vec<String>,
 }
 
@@ -349,32 +349,98 @@ fn unparsable_datetime_warning<'a>(
         .then(|| format!("Date cells that could not be parsed are shown as raw numbers: {count}"))
 }
 
-/// Spreadsheet format for `CsvData::from_xlsx`.
+/// Spreadsheet format named by the input, for `CsvData::from_spreadsheet`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpreadsheetFormat {
     Xlsx,
     Xls,
 }
 
+impl SpreadsheetFormat {
+    /// Format for a file extension, ignoring case. `None` means the input is not a spreadsheet.
+    /// Kept in the core so every front end opens the same files.
+    pub fn from_extension(extension: &str) -> Option<Self> {
+        if extension.eq_ignore_ascii_case("xlsx") {
+            Some(Self::Xlsx)
+        } else if extension.eq_ignore_ascii_case("xls") {
+            Some(Self::Xls)
+        } else {
+            None
+        }
+    }
+
+    fn parser(self) -> WorkbookParser {
+        match self {
+            Self::Xlsx => WorkbookParser::Xlsx,
+            Self::Xls => WorkbookParser::Xls,
+        }
+    }
+}
+
+/// calamine's parsers, in the order its own content detection (`open_workbook_auto`) tries them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkbookParser {
+    Xls,
+    Xlsx,
+    Xlsb,
+    Ods,
+}
+
+const WORKBOOK_PARSERS: [WorkbookParser; 4] = [
+    WorkbookParser::Xls,
+    WorkbookParser::Xlsx,
+    WorkbookParser::Xlsb,
+    WorkbookParser::Ods,
+];
+
+/// The outer `Err` means this parser cannot open the input, so another parser may. The inner
+/// result is the outcome of reading a workbook that did open.
+fn read_workbook<RS: std::io::Read + std::io::Seek>(
+    reader: RS,
+    parser: WorkbookParser,
+) -> Result<Result<CsvData, String>, calamine::Error> {
+    use calamine::{Ods, Sheets, Xls, Xlsb, Xlsx, open_workbook_from_rs};
+    let workbook = match parser {
+        WorkbookParser::Xls => Sheets::Xls(open_workbook_from_rs::<Xls<_>, _>(reader)?),
+        WorkbookParser::Xlsx => Sheets::Xlsx(open_workbook_from_rs::<Xlsx<_>, _>(reader)?),
+        WorkbookParser::Xlsb => Sheets::Xlsb(open_workbook_from_rs::<Xlsb<_>, _>(reader)?),
+        WorkbookParser::Ods => Sheets::Ods(open_workbook_from_rs::<Ods<_>, _>(reader)?),
+    };
+    Ok(CsvData::from_workbook(workbook))
+}
+
 impl CsvData {
     /// Takes a reader instead of a path so the core does not touch the file system, which wasm32
-    /// does not have. The caller names the format: detecting it from the content would need a
-    /// cloneable reader (the whole file in memory) and would hide the parser's error behind
-    /// "Cannot detect file format".
-    pub fn from_xlsx<RS: std::io::Read + std::io::Seek>(
-        reader: RS,
+    /// does not have.
+    ///
+    /// Opens the input as `format` first. If that fails, the other formats are tried, because the
+    /// name can be wrong (an xlsx saved as `.xls`). When none opens it, the error is the one for
+    /// `format`, which says more than "unknown format".
+    pub fn from_spreadsheet<RS: std::io::Read + std::io::Seek>(
+        mut reader: RS,
         format: SpreadsheetFormat,
     ) -> Result<Self, String> {
-        use calamine::{Reader, Sheets, Xls, Xlsx, open_workbook_from_rs};
-        let opened = match format {
-            SpreadsheetFormat::Xlsx => open_workbook_from_rs::<Xlsx<_>, _>(reader)
-                .map(Sheets::Xlsx)
-                .map_err(|e| e.to_string()),
-            SpreadsheetFormat::Xls => open_workbook_from_rs::<Xls<_>, _>(reader)
-                .map(Sheets::Xls)
-                .map_err(|e| e.to_string()),
+        let named = format.parser();
+        // Each attempt borrows the reader, so a failed one leaves it available for the next.
+        let named_error = match read_workbook(&mut reader, named) {
+            Ok(result) => return result,
+            Err(e) => e,
         };
-        let mut workbook = opened.map_err(|e| format!("failed to open workbook: {e}"))?;
+        for parser in WORKBOOK_PARSERS.into_iter().filter(|&p| p != named) {
+            if reader.rewind().is_err() {
+                break;
+            }
+            if let Ok(result) = read_workbook(&mut reader, parser) {
+                return result;
+            }
+        }
+        Err(format!("failed to open workbook: {named_error}"))
+    }
+
+    fn from_workbook<RS: std::io::Read + std::io::Seek>(
+        mut workbook: calamine::Sheets<RS>,
+    ) -> Result<Self, String> {
+        use calamine::Reader;
         let first_sheet = workbook
             .sheet_names()
             .first()
@@ -781,16 +847,101 @@ mod tests {
         assert_eq!(decoded.decoded_as, None);
     }
 
-    // --- from_xlsx ---
+    // --- from_spreadsheet ---
+
+    /// Smallest xlsx that calamine reads: one sheet of inline strings.
+    fn minimal_xlsx(rows: &[&[&str]]) -> Vec<u8> {
+        use std::io::Write;
+        let cells = |row: &[&str]| -> String {
+            row.iter()
+                .map(|v| format!(r#"<c t="inlineStr"><is><t>{v}</t></is></c>"#))
+                .collect()
+        };
+        let sheet_rows: String = rows
+            .iter()
+            .map(|row| format!("<row>{}</row>", cells(row)))
+            .collect();
+        let main_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        let rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let files = [
+            (
+                "_rels/.rels",
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel_ns}/officeDocument" Target="xl/workbook.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "xl/workbook.xml",
+                format!(
+                    r#"<workbook xmlns="{main_ns}" xmlns:r="{rel_ns}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+                ),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel_ns}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                format!(
+                    r#"<worksheet xmlns="{main_ns}"><sheetData>{sheet_rows}</sheetData></worksheet>"#
+                ),
+            ),
+        ];
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in files {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
 
     #[test]
-    fn from_xlsx_reports_unreadable_input() {
-        for format in [SpreadsheetFormat::Xlsx, SpreadsheetFormat::Xls] {
-            let Err(error) = CsvData::from_xlsx(std::io::Cursor::new(b"a,b\n1,2\n"), format) else {
-                panic!("CSV text is not a workbook");
-            };
-            assert!(error.starts_with("failed to open workbook: "), "{error}");
-        }
+    fn spreadsheet_format_from_extension_ignores_case() {
+        assert_eq!(
+            SpreadsheetFormat::from_extension("XLSX"),
+            Some(SpreadsheetFormat::Xlsx)
+        );
+        assert_eq!(
+            SpreadsheetFormat::from_extension("xls"),
+            Some(SpreadsheetFormat::Xls)
+        );
+        assert_eq!(SpreadsheetFormat::from_extension("csv"), None);
+    }
+
+    #[test]
+    fn from_spreadsheet_reads_xlsx() {
+        let bytes = minimal_xlsx(&[&["name", "age"], &["Alice", "30"]]);
+        let data = CsvData::from_spreadsheet(std::io::Cursor::new(bytes), SpreadsheetFormat::Xlsx)
+            .unwrap();
+        assert_eq!(data.headers, vec!["name", "age"]);
+        assert_eq!(data.rows.cell(0, 0), Some("Alice"));
+        assert_eq!(data.rows.cell(0, 1), Some("30"));
+    }
+
+    #[test]
+    fn from_spreadsheet_falls_back_when_the_name_is_wrong() {
+        // An xlsx saved with an .xls name
+        let bytes = minimal_xlsx(&[&["name"], &["Alice"]]);
+        let data =
+            CsvData::from_spreadsheet(std::io::Cursor::new(bytes), SpreadsheetFormat::Xls).unwrap();
+        assert_eq!(data.headers, vec!["name"]);
+        assert_eq!(data.rows.cell(0, 0), Some("Alice"));
+    }
+
+    #[test]
+    fn from_spreadsheet_reports_the_named_format_error() {
+        let input = std::io::Cursor::new(b"a,b\n1,2\n");
+        let Err(error) = CsvData::from_spreadsheet(input, SpreadsheetFormat::Xlsx) else {
+            panic!("CSV text is not a workbook");
+        };
+        assert!(
+            error.starts_with("failed to open workbook: Xlsx error: "),
+            "{error}"
+        );
     }
 
     // --- warnings ---

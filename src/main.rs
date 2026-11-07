@@ -37,25 +37,21 @@ fn load_csv() -> CsvData {
     }
     if args.len() == 2 {
         let path = &args[1];
-        let extension = std::path::Path::new(path)
+        let spreadsheet_format = std::path::Path::new(path)
             .extension()
             .and_then(|ext| ext.to_str())
-            .map(str::to_ascii_lowercase);
-        let spreadsheet_format = match extension.as_deref() {
-            Some("xlsx") => Some(SpreadsheetFormat::Xlsx),
-            Some("xls") => Some(SpreadsheetFormat::Xls),
-            _ => None,
-        };
+            .and_then(SpreadsheetFormat::from_extension);
 
         if let Some(format) = spreadsheet_format {
             let file = std::fs::File::open(path).unwrap_or_else(|e| {
                 eprintln!("Error: cannot open '{}': {}", path, e);
                 std::process::exit(1);
             });
-            return CsvData::from_xlsx(std::io::BufReader::new(file), format).unwrap_or_else(|e| {
-                eprintln!("Error: {}", e);
-                std::process::exit(1);
-            });
+            return CsvData::from_spreadsheet(std::io::BufReader::new(file), format)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                });
         }
 
         let bytes = std::fs::read(path).unwrap_or_else(|e| {

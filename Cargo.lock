@@ -938,6 +938,7 @@ dependencies = [
  "csv",
  "encoding_rs",
  "regex",
+ "zip",
 ]
 
 [[package]]

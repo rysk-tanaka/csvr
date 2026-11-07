@@ -51,12 +51,12 @@ src/
   app.rs       -- CsvrApp, TableRow, UIカラー定数, actions!
 ```
 
-1. **データ層** (`data.rs`) — `CsvData` が入力パースを担当。CSV は `csv` クレートで `std::io::Read` から読み込み（`flexible(true)` でフィールド数不揃いを許容）、xlsx/xls は `calamine` クレートで読み込み（`from_xlsx`。ファイルではなく `Read + Seek` から読み、形式（`SpreadsheetFormat`）は `main` が拡張子で決めて渡す）。ヘッダーは `Vec<String>`、行データは `Table`（全セルの文字を 1 本の `String` に行順に詰め、セルの区切り位置と行の開始位置を持つ。CSV では `StringRecord` から直接作る）で保持。メタデータ付きCSV（先頭にkey-value形式のメタデータ行がありデータ本体は途中から始まる形式）では、最頻フィールド数を基にデータヘッダーを自動検出・昇格し、元の行を `metadata` フィールドに保持。`decode_to_utf8` で非 UTF-8 ファイルのエンコーディング自動検出・変換（`chardetng` + `encoding_rs`）。推定した文字コード名は `DecodedInput.decoded_as` で返し、`main` が stderr に出す。読み込み時の警告は `CsvData.warnings` に集めてステータスバーと stderr に出す。`ChartType`, `SortDirection`, `ChartData`, `ChartAxes` の型定義
+1. **データ層** (`data.rs`) — `CsvData` が入力パースを担当。CSV は `csv` クレートで `std::io::Read` から読み込み（`flexible(true)` でフィールド数不揃いを許容）、xlsx/xls は `calamine` クレートで読み込み（`from_spreadsheet`。ファイルではなく `Read + Seek` から読む。形式は `SpreadsheetFormat::from_extension` で拡張子から決めて渡し、その形式で開けなければ他の形式も試す）。ヘッダーは `Vec<String>`、行データは `Table`（全セルの文字を 1 本の `String` に行順に詰め、セルの区切り位置と行の開始位置を持つ。CSV では `StringRecord` から直接作る）で保持。メタデータ付きCSV（先頭にkey-value形式のメタデータ行がありデータ本体は途中から始まる形式）では、最頻フィールド数を基にデータヘッダーを自動検出・昇格し、元の行を `metadata` フィールドに保持。`decode_to_utf8` で非 UTF-8 ファイルのエンコーディング自動検出・変換（`chardetng` + `encoding_rs`）。推定した文字コード名は `DecodedInput.decoded_as` で返し、`main` が stderr に出す。読み込み時の警告は `CsvData.warnings` に集めてステータスバーと stderr に出す。`ChartType`, `SortDirection`, `ChartData`, `ChartAxes` の型定義
 2. **計算層** (`compute.rs`) — テスト可能な純粋関数群。列幅算出、行フィルタリング（`RowFilter`: 部分一致と正規表現を 1 回の走査で判定し、区切って処理できる。`/` の部分一致はエスケープしたクエリの case-insensitive な正規表現）、数値列判定、ソート、列フィルタ（正規表現で列名マッチ）、チャート用データ抽出・ダウンサンプリング・ヒストグラムビン計算・軸の範囲と目盛り（`points_axes` / `pairs_axes` / `histogram_axes`）・列統計（`ColumnStats`: count/sum/min/max/mean/median/stddev — stddev は標本標準偏差）、エクスポート（`export_json` / `export_markdown` — 表示中データをクリップボードコピー用に変換）
 3. **チャート描画** (`chart.rs`) — `draw_chart` 関数。GPUI の `canvas` 要素の paint コールバックから呼ばれる。データに加えて凡例（系列の色と列名）と目盛りも描く
 4. **UI 層** (`app.rs`) — `CsvrApp`（`Render` トレイト実装）がメインビュー。`TableRow`（`RenderOnce` / `IntoElement`）が個別行。本体は `uniform_list` による仮想スクロール。カラーテーマは Catppuccin Mocha（`BG_BASE`, `TEXT_MAIN` 等の定数で管理）。`/`（検索）・`*`（列フィルタ）・`f`（列固定）・`&`（行フィルタ）の入力モードは排他制御（`any_input_active()` で判定）。`m`（メタデータ表示トグル）は入力モードではなく単純なトグル
 
-入力の流れ: `load_csv()`（CLI引数 or stdin） → xlsx/xls なら開いたファイルを `CsvData::from_xlsx` に渡す、それ以外は `decode_to_utf8` → `CsvData::from_reader` → `CsvrApp::new(data, cx)` → GPUI ウィンドウ
+入力の流れ: `load_csv()`（CLI引数 or stdin） → xlsx/xls なら開いたファイルを `CsvData::from_spreadsheet` に渡す、それ以外は `decode_to_utf8` → `CsvData::from_reader` → `CsvrApp::new(data, cx)` → GPUI ウィンドウ
 
 `set_dock_icon()` は `assets/icon.png` を `include_bytes!` で埋め込み、`objc` クレートで `NSApplication.setApplicationIconImage:` を呼び出して Dock アイコンを設定する。アイコンは Lucide Icons の file-spreadsheet（ISC License、帰属表示は `assets/LICENSE`）を Catppuccin Mocha カラーで調整したもの
 

@@ -76,7 +76,7 @@ impl Focusable for CsvrApp {
 - テキスト入力は入力の受け口で受ける。`EntityInputHandler` を実装し、paint の中で `window.handle_input(&focus_handle, ElementInputHandler::new(bounds, entity), cx)` を毎フレーム呼ぶ（手本は Zed の `crates/gpui/examples/input.rs`）
   - 受け口を登録したら、`on_key_down` で文字を足さない。伝播を止めなかったキーの文字は GPUI が受け口に渡すので、2 回入る
   - `on_key_down` で処理したキー（Enter・Backspace など）は `cx.stop_propagation()` で止める。止めないと、web では gpui_web の見えない textarea にも改行や削除が入り、受け口にもう一度届く
-  - web（gpui_web）は IME の変換中も先に `KeyDown` を配る。変換中は `on_key_down` とアクションでキーを処理しない（アクションでは `cx.propagate()` して返す）
+  - web（gpui_web）は IME の変換中も先に `KeyDown` を配る。変換中は `on_key_down` でキーを処理せず、キーの割り当ても効かせない。割り当ては、変換中だけキーコンテキストに識別子を足し、`KeyBinding` のコンテキストを `CsvrApp && !ime_editing` のように否定で書けば 1 か所で外せる（GPUI はキーを処理する前に、変わったビューを描き直すので、コンテキストは最新になる）
 - macOS の `QuitMode` の既定値は `Explicit`。最後のウィンドウを閉じても終了しないため `LastWindowClosed` を指定する
 
 ## バージョン更新時の注意点

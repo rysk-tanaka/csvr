@@ -50,7 +50,11 @@ pub(crate) enum ShortcutModifier {
 
 /// Bindings without a modifier come once, however many modifiers are given.
 pub(crate) fn key_bindings(modifiers: &[ShortcutModifier]) -> Vec<KeyBinding> {
-    let context = Some("CsvrApp");
+    // None of the bindings apply while the IME is composing. On the web, keys reach the app
+    // before the IME, so Escape or `cmd-f` would otherwise close the bar under the composition.
+    // The view sets `ime_editing` in its key context (see `render`), and GPUI redraws a changed
+    // view before it dispatches the next key, so the context is current.
+    let context = Some("CsvrApp && !ime_editing");
     let mut bindings = vec![KeyBinding::new("escape", DismissSearch, context)];
     for modifier in modifiers {
         // `KeyBinding::new` takes `&'static str`, so the keystrokes are spelled out per modifier.
@@ -999,17 +1003,6 @@ impl CsvrApp {
         })
     }
 
-    /// Passes a key on to the IME while it is composing, and says whether it did. On the web,
-    /// keys reach the app before the IME, so an action such as Escape or `cmd-f` would otherwise
-    /// cancel the composition by closing the bar under it.
-    fn defer_to_ime(&self, cx: &mut Context<Self>) -> bool {
-        let is_ime_editing = self.is_ime_editing();
-        if is_ime_editing {
-            cx.propagate();
-        }
-        is_ime_editing
-    }
-
     /// Puts the edited text into the open bar's query once the IME is done with it.
     fn commit_text_input(&mut self, cx: &mut Context<Self>) {
         if self.is_ime_editing() {
@@ -1275,20 +1268,18 @@ impl Render for CsvrApp {
 
         div()
             .track_focus(&self.focus_handle(cx))
-            .key_context("CsvrApp")
+            .key_context(if self.is_ime_editing() {
+                "CsvrApp ime_editing"
+            } else {
+                "CsvrApp"
+            })
             .on_action(cx.listener(|this, _: &ToggleSearch, _window, cx| {
-                if this.defer_to_ime(cx) {
-                    return;
-                }
                 if !this.any_input_active() || this.search_active {
                     this.toggle_search();
                     cx.notify();
                 }
             }))
             .on_action(cx.listener(|this, _: &DismissSearch, _window, cx| {
-                if this.defer_to_ime(cx) {
-                    return;
-                }
                 if this.col_filter_active {
                     this.close_col_filter();
                     cx.notify();
@@ -1307,35 +1298,20 @@ impl Render for CsvrApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleChart, _window, cx| {
-                if this.defer_to_ime(cx) {
-                    return;
-                }
                 this.toggle_chart();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleMetadata, _window, cx| {
-                if this.defer_to_ime(cx) {
-                    return;
-                }
                 this.toggle_metadata();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CopySelection, _window, cx| {
-                if this.defer_to_ime(cx) {
-                    return;
-                }
                 this.copy_selection(cx);
             }))
             .on_action(cx.listener(|this, _: &ExportJson, _window, cx| {
-                if this.defer_to_ime(cx) {
-                    return;
-                }
                 this.export_json(cx);
             }))
             .on_action(cx.listener(|this, _: &ExportMarkdown, _window, cx| {
-                if this.defer_to_ime(cx) {
-                    return;
-                }
                 this.export_markdown(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {

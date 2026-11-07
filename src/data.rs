@@ -30,9 +30,170 @@ pub(crate) enum SortDirection {
     Descending,
 }
 
+/// Cell text of all rows, packed so that a cell costs one offset instead of a `String`.
+///
+/// Rows are stored one after another rather than column by column, so a few rows with more fields
+/// than the rest do not add a full column of offsets for every row.
+#[derive(Debug)]
+pub(crate) struct Table {
+    /// All cells, row by row, without separators.
+    text: String,
+    /// Cell `i` is `text[cell_bounds[i]..cell_bounds[i + 1]]`.
+    cell_bounds: Vec<usize>,
+    /// Row `r` holds cells `row_starts[r]..row_starts[r + 1]`.
+    row_starts: Vec<usize>,
+    /// Number of cells in the widest row.
+    column_count: usize,
+}
+
+/// One row of a `Table`. A row may have fewer cells than `Table::column_count`.
+#[derive(Clone, Copy)]
+pub(crate) struct Row<'a> {
+    text: &'a str,
+    /// The bounds of this row's cells, one more than the number of cells.
+    bounds: &'a [usize],
+}
+
+impl<'a> Row<'a> {
+    /// `None` past the end of the row, like `Vec::get`.
+    pub(crate) fn get(&self, col: usize) -> Option<&'a str> {
+        let start = *self.bounds.get(col)?;
+        let end = *self.bounds.get(col + 1)?;
+        Some(&self.text[start..end])
+    }
+
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &'a str> + Clone + use<'a> {
+        let text = self.text;
+        self.bounds.windows(2).map(move |w| &text[w[0]..w[1]])
+    }
+}
+
+impl Table {
+    pub(crate) fn new() -> Self {
+        Self {
+            text: String::new(),
+            cell_bounds: vec![0],
+            row_starts: vec![0],
+            column_count: 0,
+        }
+    }
+
+    pub(crate) fn row_count(&self) -> usize {
+        self.row_starts.len() - 1
+    }
+
+    pub(crate) fn column_count(&self) -> usize {
+        self.column_count
+    }
+
+    pub(crate) fn row(&self, row: usize) -> Option<Row<'_>> {
+        let first = *self.row_starts.get(row)?;
+        let last = *self.row_starts.get(row + 1)?;
+        Some(Row {
+            text: &self.text,
+            bounds: &self.cell_bounds[first..=last],
+        })
+    }
+
+    /// `None` when the row is out of range or has fewer than `col + 1` cells.
+    pub(crate) fn cell(&self, row: usize, col: usize) -> Option<&str> {
+        self.row(row)?.get(col)
+    }
+
+    pub(crate) fn row_lens(&self) -> impl Iterator<Item = usize> + '_ {
+        self.row_starts.windows(2).map(|w| w[1] - w[0])
+    }
+
+    /// Append a parsed record without allocating a `String` per field.
+    pub(crate) fn push_record(&mut self, record: &csv::StringRecord) {
+        let base = self.text.len();
+        self.text.push_str(record.as_slice());
+        // `as_slice` joins the fields without separators, so field ends are offsets into it.
+        self.cell_bounds.extend((0..record.len()).map(|i| {
+            base + record
+                .range(i)
+                .expect("field index is below record.len()")
+                .end
+        }));
+        self.finish_row();
+    }
+
+    pub(crate) fn push_row<I>(&mut self, cells: I)
+    where
+        I: IntoIterator,
+        I::Item: AsRef<str>,
+    {
+        for cell in cells {
+            self.text.push_str(cell.as_ref());
+            self.cell_bounds.push(self.text.len());
+        }
+        self.finish_row();
+    }
+
+    fn finish_row(&mut self) {
+        let cell_count = self.cell_bounds.len() - 1;
+        let row_len = cell_count - self.row_starts.last().copied().unwrap_or(0);
+        self.row_starts.push(cell_count);
+        self.column_count = self.column_count.max(row_len);
+        self.debug_check();
+    }
+
+    /// Remove the first `n` rows in place. Used once at load time when a header is promoted.
+    pub(crate) fn drop_leading_rows(&mut self, n: usize) {
+        let n = n.min(self.row_count());
+        if n == 0 {
+            return;
+        }
+        let first_cell = self.row_starts[n];
+        let first_byte = self.cell_bounds[first_cell];
+        self.text.drain(..first_byte);
+        self.cell_bounds.drain(..first_cell);
+        self.row_starts.drain(..n);
+        for bound in &mut self.cell_bounds {
+            *bound -= first_byte;
+        }
+        for start in &mut self.row_starts {
+            *start -= first_cell;
+        }
+        // Padding the header counts only the remaining rows, so the dropped ones must not count.
+        self.column_count = self.row_lens().max().unwrap_or(0);
+        self.debug_check();
+    }
+
+    pub(crate) fn shrink_to_fit(&mut self) {
+        self.text.shrink_to_fit();
+        self.cell_bounds.shrink_to_fit();
+        self.row_starts.shrink_to_fit();
+    }
+
+    fn debug_check(&self) {
+        debug_assert_eq!(self.cell_bounds.first(), Some(&0));
+        debug_assert_eq!(self.cell_bounds.last(), Some(&self.text.len()));
+        debug_assert_eq!(self.row_starts.first(), Some(&0));
+        debug_assert_eq!(self.row_starts.last(), Some(&(self.cell_bounds.len() - 1)));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_rows(rows: &[&[&str]]) -> Self {
+        let mut table = Self::new();
+        for row in rows {
+            table.push_row(row.iter());
+        }
+        table
+    }
+
+    /// Bytes reserved on the heap, to keep the layout from growing unnoticed.
+    #[cfg(test)]
+    fn heap_bytes(&self) -> usize {
+        self.text.capacity()
+            + (self.cell_bounds.capacity() + self.row_starts.capacity())
+                * std::mem::size_of::<usize>()
+    }
+}
+
 pub(crate) struct CsvData {
     pub(crate) headers: Vec<String>,
-    pub(crate) rows: Vec<Vec<String>>,
+    pub(crate) rows: Table,
     /// Original header row + rows before the promoted header (metadata section in files with mixed formats)
     pub(crate) metadata: Vec<Vec<String>>,
     /// Problems found while loading the input, shown in the status bar and on stderr
@@ -46,33 +207,36 @@ impl CsvData {
             .flexible(true)
             .from_reader(reader);
         let mut headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
-        let mut rows = rdr
-            .records()
-            .map(|r| r.map(|record| record.iter().map(|s| s.to_string()).collect()))
-            .collect::<Result<Vec<Vec<String>>, _>>()?;
+        let mut rows = Table::new();
+        let mut record = csv::StringRecord::new();
+        while rdr.read_record(&mut record)? {
+            rows.push_record(&record);
+        }
 
         // Detect the dominant field count among all rows (including the parsed header).
         // If a wider field count is strictly more frequent than the header's, promote the
         // first row matching that count to the header, saving earlier rows as metadata.
         let header_len = headers.len();
-        let dominant_len = find_dominant_field_count(header_len, &rows);
+        let dominant_len = find_dominant_field_count(header_len, rows.row_lens());
         let mut metadata = Vec::new();
-        if let Some(pos) = rows
-            .iter()
-            .position(|r| dominant_len > header_len && r.len() == dominant_len)
-        {
-            // Move rows before the promoted header into metadata (avoids cloning)
-            let tail = rows.split_off(pos);
+        let promoted = (dominant_len > header_len)
+            .then(|| rows.row_lens().position(|len| len == dominant_len))
+            .flatten();
+        if let Some(pos) = promoted {
+            let owned_row = |r: usize| -> Vec<String> {
+                rows.row(r)
+                    .map(|row| row.iter().map(str::to_string).collect())
+                    .unwrap_or_default()
+            };
             metadata.push(std::mem::take(&mut headers));
-            metadata.append(&mut rows);
-            let mut tail_iter = tail.into_iter();
-            headers = tail_iter.next().unwrap_or_default();
-            rows = tail_iter.collect();
+            metadata.extend((0..pos).map(owned_row));
+            headers = owned_row(pos);
+            rows.drop_leading_rows(pos + 1);
         }
+        rows.shrink_to_fit();
 
         // Pad headers for any remaining rows wider than the header
-        let max_fields = rows.iter().map(|r| r.len()).max().unwrap_or(0);
-        for i in headers.len()..max_fields {
+        for i in headers.len()..rows.column_count() {
             headers.push(format!("Column {}", i + 1));
         }
 
@@ -88,14 +252,17 @@ impl CsvData {
 /// Find the field count that strictly dominates (more frequent than) the header's field count.
 /// Returns `header_len` if no other count is strictly more frequent, or if multiple
 /// non-header widths tie for the highest frequency (ambiguous case).
-fn find_dominant_field_count(header_len: usize, rows: &[Vec<String>]) -> usize {
+fn find_dominant_field_count(
+    header_len: usize,
+    row_lens: impl IntoIterator<Item = usize>,
+) -> usize {
     let mut counts = std::collections::HashMap::<usize, usize>::new();
     if header_len > 0 {
         *counts.entry(header_len).or_default() += 1; // count the header row itself
     }
-    for row in rows {
-        if !row.is_empty() {
-            *counts.entry(row.len()).or_default() += 1;
+    for len in row_lens {
+        if len > 0 {
+            *counts.entry(len).or_default() += 1;
         }
     }
     // Promote only when a single non-header field count is strictly more frequent than
@@ -205,9 +372,11 @@ impl CsvData {
                 warnings.push(empty_sheet_warning(&first_sheet));
                 vec![]
             });
-        let rows = row_iter
-            .map(|row| row.iter().map(cell_to_string).collect())
-            .collect();
+        let mut rows = Table::new();
+        for row in row_iter {
+            rows.push_row(row.iter().map(cell_to_string));
+        }
+        rows.shrink_to_fit();
         warnings.extend(unparsable_datetime_warning(range.rows().flatten()));
 
         Ok(CsvData {
@@ -308,14 +477,148 @@ fn is_damaged_utf8(bytes: &[u8]) -> bool {
 mod tests {
     use super::*;
 
+    fn cells(table: &Table, row: usize) -> Vec<&str> {
+        table.row(row).expect("row in range").iter().collect()
+    }
+
+    fn all_cells(table: &Table) -> Vec<Vec<&str>> {
+        (0..table.row_count()).map(|r| cells(table, r)).collect()
+    }
+
+    // --- Table ---
+
+    #[test]
+    fn table_empty() {
+        let table = Table::new();
+        assert_eq!(table.row_count(), 0);
+        assert_eq!(table.column_count(), 0);
+        assert!(table.row(0).is_none());
+        assert_eq!(table.cell(0, 0), None);
+    }
+
+    #[test]
+    fn table_ragged_rows() {
+        let table = Table::from_rows(&[&["a", ""], &["b", "c", "d"], &[]]);
+        assert_eq!(table.row_count(), 3);
+        assert_eq!(table.column_count(), 3);
+        assert_eq!(table.cell(0, 1), Some(""));
+        assert_eq!(table.cell(0, 2), None);
+        assert_eq!(table.cell(1, 2), Some("d"));
+        // A row without fields is still a row, unlike one past the end.
+        assert_eq!(table.row(2).map(|row| row.iter().count()), Some(0));
+        assert_eq!(table.cell(2, 0), None);
+        assert!(table.row(3).is_none());
+        assert_eq!(table.cell(3, 0), None);
+        assert_eq!(table.row_lens().collect::<Vec<_>>(), vec![2, 3, 0]);
+    }
+
+    #[test]
+    fn table_multibyte_cells() {
+        let table = Table::from_rows(&[&["名前", "é"], &["", "🍣"]]);
+        assert_eq!(all_cells(&table), vec![vec!["名前", "é"], vec!["", "🍣"]]);
+    }
+
+    #[test]
+    fn table_push_record_matches_push_row() {
+        let input = "a,b\n\"x, y\",\"line1\nline2\"\n,名前,z\n";
+        let mut rdr = csv::ReaderBuilder::new()
+            .has_headers(false)
+            .flexible(true)
+            .from_reader(input.as_bytes());
+        let mut from_records = Table::new();
+        let mut from_strings = Table::new();
+        for record in rdr.records() {
+            let record = record.unwrap();
+            from_records.push_record(&record);
+            from_strings.push_row(record.iter());
+        }
+        assert_eq!(
+            all_cells(&from_records),
+            vec![
+                vec!["a", "b"],
+                vec!["x, y", "line1\nline2"],
+                vec!["", "名前", "z"]
+            ]
+        );
+        assert_eq!(all_cells(&from_records), all_cells(&from_strings));
+        assert_eq!(from_records.column_count(), 3);
+    }
+
+    #[test]
+    fn table_drop_some_leading_rows_keeps_remaining_cells() {
+        let rows: &[&[&str]] = &[
+            &["名前", "", "a", "b", "c"],
+            &[],
+            &["é", ""],
+            &["x", "🍣"],
+            &[],
+            &["", "y", "z"],
+        ];
+        let mut table = Table::from_rows(rows);
+        table.drop_leading_rows(2);
+        let expected: Vec<Vec<&str>> = rows[2..].iter().map(|row| row.to_vec()).collect();
+        assert_eq!(all_cells(&table), expected);
+        assert_eq!(table.column_count(), 3);
+    }
+
+    #[test]
+    fn table_drop_no_rows() {
+        let mut table = Table::from_rows(&[&["a"], &["b", "c"]]);
+        table.drop_leading_rows(0);
+        assert_eq!(all_cells(&table), vec![vec!["a"], vec!["b", "c"]]);
+    }
+
+    #[test]
+    fn table_drop_all_rows_allows_pushing_again() {
+        for n in [2, 5] {
+            let mut table = Table::from_rows(&[&["a", "b"], &["c"]]);
+            table.drop_leading_rows(n);
+            assert_eq!(table.row_count(), 0);
+            assert_eq!(table.column_count(), 0);
+            assert_eq!(table.cell_bounds, vec![0]);
+            assert_eq!(table.row_starts, vec![0]);
+            table.push_row(["d"]);
+            assert_eq!(all_cells(&table), vec![vec!["d"]]);
+        }
+    }
+
+    #[test]
+    fn table_heap_bytes_stays_compact() {
+        const ROWS: usize = 1_000;
+        const COLS: usize = 8;
+        let mut table = Table::new();
+        for r in 0..ROWS {
+            table.push_row((0..COLS).map(|c| format!("{}", r * COLS + c)));
+        }
+        table.shrink_to_fit();
+        let text_len = table.text.len();
+        let limit = text_len + 9 * ROWS * COLS + 9 * ROWS;
+        assert!(
+            table.heap_bytes() <= limit,
+            "{} > {limit}",
+            table.heap_bytes()
+        );
+    }
+
+    // --- find_dominant_field_count ---
+
+    #[test]
+    fn dominant_field_count_ignores_empty_rows() {
+        assert_eq!(find_dominant_field_count(2, [3, 3, 0, 0, 0]), 3);
+        assert_eq!(find_dominant_field_count(2, [2, 3]), 2);
+    }
+
+    // --- from_reader ---
+
     #[test]
     fn parse_basic_csv() {
         let input = "name,age,city\nAlice,30,Tokyo\nBob,25,Osaka\n";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
         assert_eq!(data.headers, vec!["name", "age", "city"]);
-        assert_eq!(data.rows.len(), 2);
-        assert_eq!(data.rows[0], vec!["Alice", "30", "Tokyo"]);
-        assert_eq!(data.rows[1], vec!["Bob", "25", "Osaka"]);
+        assert_eq!(data.rows.row_count(), 2);
+        assert_eq!(cells(&data.rows, 0), vec!["Alice", "30", "Tokyo"]);
+        assert_eq!(cells(&data.rows, 1), vec!["Bob", "25", "Osaka"]);
+        assert_eq!(data.metadata, Vec::<Vec<String>>::new());
     }
 
     #[test]
@@ -323,7 +626,7 @@ mod tests {
         let input = "value\n1\n2\n3\n";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
         assert_eq!(data.headers, vec!["value"]);
-        assert_eq!(data.rows.len(), 3);
+        assert_eq!(data.rows.row_count(), 3);
     }
 
     #[test]
@@ -331,15 +634,15 @@ mod tests {
         let input = "a,b,c\n";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
         assert_eq!(data.headers, vec!["a", "b", "c"]);
-        assert!(data.rows.is_empty());
+        assert_eq!(data.rows.row_count(), 0);
     }
 
     #[test]
     fn parse_quoted_fields() {
         let input = "name,note\nAlice,\"hello, world\"\nBob,\"line1\nline2\"\n";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
-        assert_eq!(data.rows[0][1], "hello, world");
-        assert_eq!(data.rows[1][1], "line1\nline2");
+        assert_eq!(data.rows.cell(0, 1), Some("hello, world"));
+        assert_eq!(data.rows.cell(1, 1), Some("line1\nline2"));
     }
 
     #[test]
@@ -347,7 +650,39 @@ mod tests {
         let input = "";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
         assert!(data.headers.is_empty());
-        assert!(data.rows.is_empty());
+        assert_eq!(data.rows.row_count(), 0);
+    }
+
+    #[test]
+    fn parse_promotes_first_row_as_header() {
+        // The first data row already has the dominant width, so it is promoted and only the
+        // parsed header goes to metadata.
+        let input = "k\nh1,h2,h3\n1,2,3\n4,5,6\n";
+        let data = CsvData::from_reader(input.as_bytes()).unwrap();
+        assert_eq!(data.headers, vec!["h1", "h2", "h3"]);
+        assert_eq!(data.metadata, vec![vec!["k".to_string()]]);
+        assert_eq!(
+            all_cells(&data.rows),
+            vec![vec!["1", "2", "3"], vec!["4", "5", "6"]]
+        );
+    }
+
+    #[test]
+    fn parse_wide_metadata_row_does_not_pad_header() {
+        let input = "k,v\nx,1,2,3,4,5,6\nh1,h2,h3\n1,2,3\n4,5,6\n";
+        let data = CsvData::from_reader(input.as_bytes()).unwrap();
+        assert_eq!(data.headers, vec!["h1", "h2", "h3"]);
+        assert_eq!(data.rows.column_count(), 3);
+        assert_eq!(data.metadata.len(), 2);
+        assert_eq!(data.metadata[1], vec!["x", "1", "2", "3", "4", "5", "6"]);
+    }
+
+    #[test]
+    fn parse_pads_promoted_header_for_wider_rows() {
+        let input = "k,v\nh1,h2,h3\n1,2,3\n4,5,6\n7,8,9,10\n";
+        let data = CsvData::from_reader(input.as_bytes()).unwrap();
+        assert_eq!(data.headers, vec!["h1", "h2", "h3", "Column 4"]);
+        assert_eq!(cells(&data.rows, 2), vec!["7", "8", "9", "10"]);
     }
 
     #[test]
@@ -357,8 +692,8 @@ mod tests {
         let input = "key,value\nmeta1,v1\nmeta2,v2\nh1,h2,h3,h4,h5\n1,2,3,4,5\n6,7,8,9,10\n11,12,13,14,15\n";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
         assert_eq!(data.headers, vec!["h1", "h2", "h3", "h4", "h5"]);
-        assert_eq!(data.rows.len(), 3);
-        assert_eq!(data.rows[0], vec!["1", "2", "3", "4", "5"]);
+        assert_eq!(data.rows.row_count(), 3);
+        assert_eq!(cells(&data.rows, 0), vec!["1", "2", "3", "4", "5"]);
         assert_eq!(data.metadata.len(), 3); // original header + 2 meta rows
         assert_eq!(data.metadata[0], vec!["key", "value"]);
         assert_eq!(data.metadata[1], vec!["meta1", "v1"]);

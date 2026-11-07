@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::sync::Arc;
 
 use regex::{Regex, RegexBuilder};
 
-use crate::data::{ChartAxes, ChartAxis, ChartType, CsvData, SortDirection};
+use crate::data::{ChartAxes, ChartAxis, ChartType, CsvData, Row, SortDirection, Table};
 
 /// Pixel width per character (monospace approximation at text_sm)
 pub(crate) const CHAR_WIDTH: f32 = 7.5;
@@ -14,14 +13,17 @@ pub(crate) const COL_PADDING: f32 = 24.0;
 pub(crate) const ROW_NUM_WIDTH: f32 = 16.0;
 
 pub(crate) fn compute_column_widths(data: &CsvData) -> Vec<f32> {
-    let sample_count = data.rows.len().min(100);
+    let sample_count = data.rows.row_count().min(100);
     data.headers
         .iter()
         .enumerate()
         .map(|(col_idx, header)| {
-            let max_len = data.rows[..sample_count]
-                .iter()
-                .map(|row| row.get(col_idx).map_or(0, |cell| cell.chars().count()))
+            let max_len = (0..sample_count)
+                .map(|r| {
+                    data.rows
+                        .cell(r, col_idx)
+                        .map_or(0, |cell| cell.chars().count())
+                })
                 .max()
                 .unwrap_or(0)
                 .max(header.to_uppercase().chars().count());
@@ -118,11 +120,50 @@ pub(crate) fn anchored_position(old: &[usize], new: &RowPositions, top: usize) -
         .or_else(|| new.len.checked_sub(1))
 }
 
+/// The `/` query, matched as a literal anywhere in a cell regardless of case.
+enum SearchQuery {
+    /// No `/` query: every row passes.
+    None,
+    /// The escaped query, so that cells are matched without allocating a lowercased copy of each.
+    Regex(Regex),
+    /// Used only when the regex cannot be built (a query past the regex size limit), so that a
+    /// long query still narrows the rows instead of matching nothing.
+    Lowercase(String),
+}
+
+impl SearchQuery {
+    /// `size_limit` is `None` to keep the `regex` crate's default; tests pass a small one to
+    /// reach the fallback.
+    fn new(query: &str, size_limit: Option<usize>) -> Self {
+        if query.is_empty() {
+            return Self::None;
+        }
+        let mut builder = RegexBuilder::new(&regex::escape(query));
+        builder.case_insensitive(true);
+        if let Some(limit) = size_limit {
+            builder.size_limit(limit);
+        }
+        match builder.build() {
+            Ok(re) => Self::Regex(re),
+            Err(_) => Self::Lowercase(query.to_lowercase()),
+        }
+    }
+
+    fn matches(&self, row: Row<'_>) -> bool {
+        match self {
+            Self::None => true,
+            Self::Regex(re) => row.iter().any(|cell| re.is_match(cell)),
+            Self::Lowercase(query) => row
+                .iter()
+                .any(|cell| cell.to_lowercase().contains(query.as_str())),
+        }
+    }
+}
+
 /// The `/` search and the `&` regex filter, prepared once per query so that the rows can be
 /// checked in chunks off the UI thread.
 pub(crate) struct RowFilter {
-    /// Lowercased `/` query; `None` when the query is empty.
-    query_lower: Option<String>,
+    query: SearchQuery,
     /// Compiled `&` pattern and its target column; `None` when the pattern is empty or invalid.
     regex: Option<(Regex, Option<usize>)>,
 }
@@ -131,13 +172,16 @@ impl RowFilter {
     /// An invalid `pattern` is ignored so that the `/` search still narrows the rows; check it
     /// with `is_valid_pattern` to show the error.
     pub(crate) fn new(query: &str, pattern: &str, target_col: Option<usize>) -> Self {
-        let query_lower = (!query.is_empty()).then(|| query.to_lowercase());
+        Self::with_search(SearchQuery::new(query, None), pattern, target_col)
+    }
+
+    fn with_search(query: SearchQuery, pattern: &str, target_col: Option<usize>) -> Self {
         let regex = if pattern.is_empty() {
             None
         } else {
             Self::build_regex(pattern).ok().map(|re| (re, target_col))
         };
-        Self { query_lower, regex }
+        Self { query, regex }
     }
 
     /// Whether the `&` filter accepts `pattern`. An empty pattern is valid and filters nothing.
@@ -151,12 +195,8 @@ impl RowFilter {
     }
 
     /// The two conditions are checked separately, so they may hold in different cells.
-    pub(crate) fn matches(&self, row: &[String]) -> bool {
-        let matches_query = self.query_lower.as_ref().is_none_or(|query| {
-            row.iter()
-                .any(|cell| cell.to_lowercase().contains(query.as_str()))
-        });
-        if !matches_query {
+    pub(crate) fn matches(&self, row: Row<'_>) -> bool {
+        if !self.query.matches(row) {
             return false;
         }
         match &self.regex {
@@ -168,26 +208,21 @@ impl RowFilter {
 
     /// Append the indices in `range` whose rows match. Called chunk by chunk so that a task can
     /// yield between chunks.
-    pub(crate) fn filter_range(
-        &self,
-        rows: &[Arc<Vec<String>>],
-        range: Range<usize>,
-        out: &mut Vec<usize>,
-    ) {
-        let end = range.end.min(rows.len());
+    pub(crate) fn filter_range(&self, rows: &Table, range: Range<usize>, out: &mut Vec<usize>) {
+        let end = range.end.min(rows.row_count());
         let start = range.start.min(end);
-        out.extend((start..end).filter(|&i| self.matches(&rows[i])));
+        out.extend((start..end).filter(|&i| rows.row(i).is_some_and(|row| self.matches(row))));
     }
 }
 
 /// Determine which columns are numeric based on all rows.
-pub(crate) fn compute_numeric_columns(rows: &[Vec<String>], col_count: usize) -> Vec<bool> {
+pub(crate) fn compute_numeric_columns(rows: &Table, col_count: usize) -> Vec<bool> {
     (0..col_count)
         .map(|col| {
             let mut numeric_count: usize = 0;
             let mut non_empty_count: usize = 0;
-            for row in rows {
-                let val = row.get(col).map(|s| s.as_str()).unwrap_or("");
+            for r in 0..rows.row_count() {
+                let val = rows.cell(r, col).unwrap_or("");
                 if !val.is_empty() {
                     non_empty_count += 1;
                     if val.parse::<f64>().is_ok() {
@@ -205,7 +240,7 @@ pub(crate) fn compute_numeric_columns(rows: &[Vec<String>], col_count: usize) ->
 /// file order, as a full refilter does, so rows that tie in the sort column keep file order
 /// instead of the order of the previous sort. With no sort, the result is file order.
 pub(crate) fn reorder_indices(
-    rows: &[Arc<Vec<String>>],
+    rows: &Table,
     shown: &[usize],
     sort: Option<(usize, bool, SortDirection)>,
 ) -> Vec<usize> {
@@ -220,7 +255,7 @@ pub(crate) fn reorder_indices(
 }
 
 pub(crate) fn sort_indices(
-    rows: &[Arc<Vec<String>>],
+    rows: &Table,
     indices: &[usize],
     col: usize,
     use_numeric: bool,
@@ -231,7 +266,7 @@ pub(crate) fn sort_indices(
         let mut keyed: Vec<(usize, f64)> = indices
             .iter()
             .map(|&i| {
-                let val = rows[i].get(col).map(|s| s.as_str()).unwrap_or("");
+                let val = rows.cell(i, col).unwrap_or("");
                 let n = val.parse::<f64>().unwrap_or(f64::NEG_INFINITY);
                 (i, n)
             })
@@ -244,8 +279,8 @@ pub(crate) fn sort_indices(
     } else {
         let mut sorted = indices.to_vec();
         sorted.sort_by(|&a, &b| {
-            let val_a = rows[a].get(col).map(|s| s.as_str()).unwrap_or("");
-            let val_b = rows[b].get(col).map(|s| s.as_str()).unwrap_or("");
+            let val_a = rows.cell(a, col).unwrap_or("");
+            let val_b = rows.cell(b, col).unwrap_or("");
             match direction {
                 SortDirection::Ascending => val_a.cmp(val_b),
                 SortDirection::Descending => val_b.cmp(val_a),
@@ -258,14 +293,14 @@ pub(crate) fn sort_indices(
 /// Extract finite numeric values from a specific column for the given row indices.
 /// Non-numeric, NaN, Infinity, and missing values are skipped.
 pub(crate) fn extract_column_values(
-    rows: &[Arc<Vec<String>>],
+    rows: &Table,
     indices: &[usize],
     col: usize,
 ) -> Vec<(usize, f64)> {
     indices
         .iter()
         .filter_map(|&i| {
-            let val = rows.get(i)?.get(col)?.as_str();
+            let val = rows.cell(i, col)?;
             val.parse::<f64>()
                 .ok()
                 .filter(|v| v.is_finite())
@@ -300,7 +335,7 @@ pub(crate) fn downsample<T: Copy>(values: &[T], max: usize) -> Vec<T> {
 /// Extract paired finite numeric values from two columns for the given row indices.
 /// Only rows where both columns have a valid finite number are included.
 pub(crate) fn extract_scatter_pairs(
-    rows: &[Arc<Vec<String>>],
+    rows: &Table,
     indices: &[usize],
     x_col: usize,
     y_col: usize,
@@ -308,7 +343,7 @@ pub(crate) fn extract_scatter_pairs(
     indices
         .iter()
         .filter_map(|&i| {
-            let row = rows.get(i)?;
+            let row = rows.row(i)?;
             let x = row
                 .get(x_col)?
                 .parse::<f64>()
@@ -340,7 +375,7 @@ pub(crate) struct ColumnStats {
 /// Collects values into a Vec for median (requires sorting) and stddev (two-pass).
 /// Returns `None` if no finite numeric values exist.
 pub(crate) fn compute_column_stats(
-    rows: &[Arc<Vec<String>>],
+    rows: &Table,
     indices: &[usize],
     col: usize,
 ) -> Option<ColumnStats> {
@@ -351,8 +386,7 @@ pub(crate) fn compute_column_stats(
 
     for &row_idx in indices {
         let v = rows
-            .get(row_idx)
-            .and_then(|row| row.get(col))
+            .cell(row_idx, col)
             .and_then(|cell| cell.parse::<f64>().ok())
             .filter(|v| v.is_finite());
         if let Some(v) = v {
@@ -622,7 +656,7 @@ pub(crate) fn copied_status_message(format_name: &str, row_count: usize) -> Stri
 /// Export visible data as JSON (array of objects).
 pub(crate) fn export_json(
     headers: &[String],
-    rows: &[Arc<Vec<String>>],
+    rows: &Table,
     filtered_indices: &[usize],
     visible_col_indices: &[usize],
 ) -> String {
@@ -633,7 +667,7 @@ pub(crate) fn export_json(
     let mut out = String::new();
     let mut written = 0usize;
     for &row_idx in filtered_indices {
-        let Some(row) = rows.get(row_idx) else {
+        let Some(row) = rows.row(row_idx) else {
             continue;
         };
         if written > 0 {
@@ -645,7 +679,7 @@ pub(crate) fn export_json(
                 out.push_str(", ");
             }
             let key = &deduped_keys[j];
-            let val = row.get(col_idx).map_or("", |s| s.as_str());
+            let val = row.get(col_idx).unwrap_or("");
             out.push_str(&format!(
                 "\"{}\": \"{}\"",
                 escape_json_string(key),
@@ -668,7 +702,7 @@ fn escape_markdown_cell(s: &str) -> String {
 /// Export visible data as GitHub-flavored Markdown table.
 pub(crate) fn export_markdown(
     headers: &[String],
-    rows: &[Arc<Vec<String>>],
+    rows: &Table,
     filtered_indices: &[usize],
     visible_col_indices: &[usize],
 ) -> String {
@@ -691,12 +725,12 @@ pub(crate) fn export_markdown(
     out.push('\n');
     // Data rows
     for &row_idx in filtered_indices {
-        let Some(row) = rows.get(row_idx) else {
+        let Some(row) = rows.row(row_idx) else {
             continue;
         };
         out.push('|');
         for &col_idx in visible_col_indices {
-            let val = row.get(col_idx).map_or("", |s| s.as_str());
+            let val = row.get(col_idx).unwrap_or("");
             out.push_str(&format!(" {} |", escape_markdown_cell(val)));
         }
         out.push('\n');
@@ -712,19 +746,14 @@ mod tests {
     fn make_csv_data(headers: &[&str], rows: &[&[&str]]) -> CsvData {
         CsvData {
             headers: headers.iter().map(|s| s.to_string()).collect(),
-            rows: rows
-                .iter()
-                .map(|row| row.iter().map(|s| s.to_string()).collect())
-                .collect(),
+            rows: Table::from_rows(rows),
             metadata: Vec::new(),
             warnings: Vec::new(),
         }
     }
 
-    fn make_rows(rows: &[&[&str]]) -> Vec<Arc<Vec<String>>> {
-        rows.iter()
-            .map(|row| Arc::new(row.iter().map(|s| s.to_string()).collect()))
-            .collect()
+    fn make_rows(rows: &[&[&str]]) -> Table {
+        Table::from_rows(rows)
     }
 
     // --- clamp_h_offset ---
@@ -825,9 +854,15 @@ mod tests {
         // Ragged rows display with blank cells in the UI.
         let input = "a,b,c\n1,2\n4,5,6\n";
         let data = CsvData::from_reader(input.as_bytes()).unwrap();
-        assert_eq!(data.rows.len(), 2);
-        assert_eq!(data.rows[0], vec!["1", "2"]);
-        assert_eq!(data.rows[1], vec!["4", "5", "6"]);
+        assert_eq!(data.rows.row_count(), 2);
+        assert_eq!(
+            data.rows.row(0).unwrap().iter().collect::<Vec<_>>(),
+            ["1", "2"]
+        );
+        assert_eq!(
+            data.rows.row(1).unwrap().iter().collect::<Vec<_>>(),
+            ["4", "5", "6"]
+        );
     }
 
     #[test]
@@ -880,7 +915,7 @@ mod tests {
 
     /// Filter all rows in one call, returning the matching indices and the regex error flag.
     fn filter_all(
-        rows: &[Arc<Vec<String>>],
+        rows: &Table,
         query: &str,
         pattern: &str,
         target_col: Option<usize>,
@@ -888,11 +923,11 @@ mod tests {
         let filter = RowFilter::new(query, pattern, target_col);
         let has_error = !RowFilter::is_valid_pattern(pattern);
         let mut out = Vec::new();
-        filter.filter_range(rows, 0..rows.len(), &mut out);
+        filter.filter_range(rows, 0..rows.row_count(), &mut out);
         (out, has_error)
     }
 
-    fn search(rows: &[Arc<Vec<String>>], query: &str) -> Vec<usize> {
+    fn search(rows: &Table, query: &str) -> Vec<usize> {
         filter_all(rows, query, "", None).0
     }
 
@@ -928,8 +963,33 @@ mod tests {
 
     #[test]
     fn filter_empty_rows() {
-        let rows: Vec<Arc<Vec<String>>> = vec![];
+        let rows = make_rows(&[]);
         assert!(search(&rows, "test").is_empty());
+    }
+
+    #[test]
+    fn filter_query_is_literal() {
+        let rows = make_rows(&[&["axb"], &["a.b"], &["a+b"]]);
+        assert_eq!(search(&rows, "a.b"), vec![1]);
+        assert_eq!(search(&rows, "a+b"), vec![2]);
+    }
+
+    #[test]
+    fn filter_query_folds_final_sigma() {
+        // `to_lowercase` turns a word-final Σ into ς, which σ would not find.
+        let rows = make_rows(&[&["ΟΔΟΣ"], &["ΑΒΓ"]]);
+        assert_eq!(search(&rows, "σ"), vec![0]);
+    }
+
+    #[test]
+    fn filter_query_falls_back_when_regex_is_too_large() {
+        let query = SearchQuery::new("alice", Some(1));
+        assert!(matches!(query, SearchQuery::Lowercase(_)));
+        let rows = make_rows(&[&["ALICE", "Tokyo"], &["Alice", "Osaka"], &["Bob", "Tokyo"]]);
+        let filter = RowFilter::with_search(query, "tokyo", None);
+        let mut out = Vec::new();
+        filter.filter_range(&rows, 0..rows.row_count(), &mut out);
+        assert_eq!(out, vec![0]);
     }
 
     // --- RowFilter: `/` and `&` together, and chunking ---
@@ -975,7 +1035,7 @@ mod tests {
         ]);
         let filter = RowFilter::new("a", "", None);
         let mut chunked = Vec::new();
-        for start in (0..rows.len()).step_by(3) {
+        for start in (0..rows.row_count()).step_by(3) {
             filter.filter_range(&rows, start..start + 3, &mut chunked);
         }
         assert_eq!(chunked, search(&rows, "a"));
@@ -1697,6 +1757,12 @@ mod tests {
     fn filter_rows_regex_column_specific() {
         let rows = make_rows(&[&["Alice", "Tokyo"], &["Bob", "Osaka"], &["Carol", "Tokyo"]]);
         assert_eq!(filter_all(&rows, "", "tokyo", Some(1)), (vec![0, 2], false));
+    }
+
+    #[test]
+    fn filter_rows_regex_column_missing_in_short_row() {
+        let rows = make_rows(&[&["Tokyo"], &["Bob", "Tokyo"]]);
+        assert_eq!(filter_all(&rows, "", "tokyo", Some(1)), (vec![1], false));
     }
 
     #[test]

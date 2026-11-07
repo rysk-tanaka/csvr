@@ -1,5 +1,7 @@
 [workspace]
 members = ["crates/csvr-core"]
+# Plain `cargo test` / `cargo clippy` at the root would otherwise skip the core, where all tests live.
+default-members = [".", "crates/csvr-core"]
 resolver = "3"
 
 [workspace.dependencies]

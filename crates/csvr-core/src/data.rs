@@ -62,20 +62,14 @@ impl<'a> Row<'a> {
         Some(&self.text[start..end])
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &'a str> + Clone + use<'a> {
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &'a str> + Clone + use<'a> {
         let text = self.text;
         self.bounds.windows(2).map(move |w| &text[w[0]..w[1]])
     }
 }
 
-impl Default for Table {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Table {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             text: String::new(),
             cell_bounds: vec![0],
@@ -355,11 +349,32 @@ fn unparsable_datetime_warning<'a>(
         .then(|| format!("Date cells that could not be parsed are shown as raw numbers: {count}"))
 }
 
+/// Spreadsheet format for `CsvData::from_xlsx`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpreadsheetFormat {
+    Xlsx,
+    Xls,
+}
+
 impl CsvData {
-    pub fn from_xlsx<P: AsRef<std::path::Path>>(path: P) -> Result<Self, String> {
-        use calamine::{Reader, open_workbook_auto};
-        let mut workbook =
-            open_workbook_auto(&path).map_err(|e| format!("failed to open workbook: {}", e))?;
+    /// Takes a reader instead of a path so the core does not touch the file system, which wasm32
+    /// does not have. The caller names the format: detecting it from the content would need a
+    /// cloneable reader (the whole file in memory) and would hide the parser's error behind
+    /// "Cannot detect file format".
+    pub fn from_xlsx<RS: std::io::Read + std::io::Seek>(
+        reader: RS,
+        format: SpreadsheetFormat,
+    ) -> Result<Self, String> {
+        use calamine::{Reader, Sheets, Xls, Xlsx, open_workbook_from_rs};
+        let opened = match format {
+            SpreadsheetFormat::Xlsx => open_workbook_from_rs::<Xlsx<_>, _>(reader)
+                .map(Sheets::Xlsx)
+                .map_err(|e| e.to_string()),
+            SpreadsheetFormat::Xls => open_workbook_from_rs::<Xls<_>, _>(reader)
+                .map(Sheets::Xls)
+                .map_err(|e| e.to_string()),
+        };
+        let mut workbook = opened.map_err(|e| format!("failed to open workbook: {e}"))?;
         let first_sheet = workbook
             .sheet_names()
             .first()
@@ -764,6 +779,18 @@ mod tests {
         assert!(decoded.warning.is_none());
         // ISO-2022-JP is also valid UTF-8, so it is not reported as a guess.
         assert_eq!(decoded.decoded_as, None);
+    }
+
+    // --- from_xlsx ---
+
+    #[test]
+    fn from_xlsx_reports_unreadable_input() {
+        for format in [SpreadsheetFormat::Xlsx, SpreadsheetFormat::Xls] {
+            let Err(error) = CsvData::from_xlsx(std::io::Cursor::new(b"a,b\n1,2\n"), format) else {
+                panic!("CSV text is not a workbook");
+            };
+            assert!(error.starts_with("failed to open workbook: "), "{error}");
+        }
     }
 
     // --- warnings ---

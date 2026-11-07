@@ -92,8 +92,8 @@ cat data.csv | csvr
 ```bash
 cargo run -- data.csv    # 開発実行
 cargo build --release    # リリースビルド
-cargo test --workspace   # テスト
-cargo clippy --workspace # lint
+cargo test               # テスト
+cargo clippy             # lint
 cargo fmt --check        # フォーマットチェック
 ```
 

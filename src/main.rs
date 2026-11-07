@@ -6,7 +6,7 @@ use std::io::IsTerminal;
 
 use gpui::{App, AppContext, Bounds, KeyBinding, QuitMode, WindowBounds, WindowOptions, px, size};
 
-use csvr_core::data::{CsvData, DecodedInput, decode_to_utf8};
+use csvr_core::data::{CsvData, DecodedInput, SpreadsheetFormat, decode_to_utf8};
 
 use crate::app::{
     CopySelection, CsvrApp, DismissSearch, ExportJson, ExportMarkdown, Quit, ToggleChart,
@@ -37,13 +37,22 @@ fn load_csv() -> CsvData {
     }
     if args.len() == 2 {
         let path = &args[1];
-        let is_spreadsheet = std::path::Path::new(path)
+        let extension = std::path::Path::new(path)
             .extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx") || ext.eq_ignore_ascii_case("xls"));
+            .map(str::to_ascii_lowercase);
+        let spreadsheet_format = match extension.as_deref() {
+            Some("xlsx") => Some(SpreadsheetFormat::Xlsx),
+            Some("xls") => Some(SpreadsheetFormat::Xls),
+            _ => None,
+        };
 
-        if is_spreadsheet {
-            return CsvData::from_xlsx(path).unwrap_or_else(|e| {
+        if let Some(format) = spreadsheet_format {
+            let file = std::fs::File::open(path).unwrap_or_else(|e| {
+                eprintln!("Error: cannot open '{}': {}", path, e);
+                std::process::exit(1);
+            });
+            return CsvData::from_xlsx(std::io::BufReader::new(file), format).unwrap_or_else(|e| {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);
             });

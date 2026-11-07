@@ -190,7 +190,7 @@ impl RowFilter {
     }
 
     /// The two conditions are checked separately, so they may hold in different cells.
-    pub fn matches(&self, row: Row<'_>) -> bool {
+    pub(crate) fn matches(&self, row: Row<'_>) -> bool {
         if !self.query.matches(row) {
             return false;
         }

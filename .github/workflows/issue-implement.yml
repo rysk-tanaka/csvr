@@ -27,8 +27,8 @@ jobs:
         1. `gh issue view ${{ github.event.issue.number }}` で Issue の要件を確認する
         2. 作業ブランチを作成する: `git fetch origin implement-issue-${{ github.event.issue.number }}:implement-issue-${{ github.event.issue.number }} 2>/dev/null && git checkout implement-issue-${{ github.event.issue.number }} || git checkout -b implement-issue-${{ github.event.issue.number }}`
         3. 実装を行う
-        4. `cargo test --workspace` を実行してテストを確認する
-        5. `cargo clippy --workspace` を実行して lint エラーがないことを確認する
+        4. `cargo test` を実行してテストを確認する
+        5. `cargo clippy` を実行して lint エラーがないことを確認する
         6. `cargo fmt` を実行して整形する
         7. 変更をコミットして `git push origin implement-issue-${{ github.event.issue.number }}` でプッシュする（`-u` フラグ不可）
         8. PR 本文を `/tmp/pr-body.md` に Write ツールで書き出し（必ず `Closes #${{ github.event.issue.number }}` を含める）、`gh pr create --title "..." --body-file /tmp/pr-body.md` で PR を作成する（`--body` は使用しない）

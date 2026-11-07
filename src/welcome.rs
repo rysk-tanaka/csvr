@@ -86,7 +86,8 @@ impl WebRoot {
 
     /// Starts a load and returns its number. Loads started before it no longer show. It also
     /// clears the last failure, which would otherwise stay on the welcome screen while the next
-    /// file is read and look like that file failed.
+    /// file is read and look like that file failed. Only the welcome screen shows `message`; the
+    /// table shows failures in its status bar, which clears itself after a few seconds.
     pub(crate) fn start_load(&mut self, cx: &mut Context<Self>) -> u64 {
         self.latest_load += 1;
         if self.message.take().is_some() {

@@ -54,7 +54,8 @@ const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 /// number. Counted in the content width so the last column still reaches the right edge.
 const PINNED_BORDER_WIDTH: f32 = 1.0;
 /// Rows a filter task checks between yields. Small enough that a replaced task stops soon and a
-/// single-threaded browser build still handles input; large enough that yielding costs little.
+/// single-threaded build of the planned browser version (gpui_web), which runs background tasks
+/// on the UI thread, still handles input; large enough that yielding costs little.
 const FILTER_CHUNK_ROWS: usize = 50_000;
 
 /// Decided when a task starts, so the result is shown the way it was requested even if the
@@ -64,6 +65,14 @@ enum ScrollTarget {
     Top,
     /// Where each row went, to anchor the view as it is when the result arrives.
     Keep(RowPositions),
+}
+
+/// What a filter task orders. Only the source it needs is moved into the task.
+enum RowSource {
+    /// A query changed, so every row is checked again.
+    Filter(RowFilter),
+    /// Only the sort changed, so the rows already shown are reordered.
+    Reorder(Arc<Vec<usize>>),
 }
 
 struct FilterResult {
@@ -359,14 +368,15 @@ impl CsvrApp {
         let rows = self.rows.clone();
         // A sort alone keeps the same rows, so the shown rows are reordered instead of filtered
         // again. They are the full result for the current queries unless a query changed.
-        let filter = self.needs_refilter.then(|| {
-            RowFilter::new(
+        let source = if self.needs_refilter {
+            RowSource::Filter(RowFilter::new(
                 &self.search_query,
                 &self.row_filter_pattern,
                 self.row_filter_col,
-            )
-        });
-        let shown = self.filtered_indices.clone();
+            ))
+        } else {
+            RowSource::Reorder(self.filtered_indices.clone())
+        };
         let sort = self.sort_state.map(|(col, direction)| {
             let use_numeric = self.numeric_columns.get(col).copied().unwrap_or(false);
             (col, use_numeric, direction)
@@ -376,21 +386,20 @@ impl CsvrApp {
             let result = cx
                 .background_executor()
                 .spawn(async move {
-                    let is_refiltered = filter.is_some();
-                    let mut indices = match filter {
-                        Some(filter) => {
+                    let is_refiltered = matches!(source, RowSource::Filter(_));
+                    let mut indices = match source {
+                        RowSource::Filter(filter) => {
                             let mut indices = Vec::new();
                             for start in (0..rows.len()).step_by(FILTER_CHUNK_ROWS) {
                                 let chunk = start..start + FILTER_CHUNK_ROWS;
                                 filter.filter_range(&rows, chunk, &mut indices);
                                 // Lets a replaced task stop here, and lets a single-threaded
-                                // browser build, which runs this on the UI thread, handle input
-                                // in between.
+                                // build of the planned browser version handle input in between.
                                 yield_now().await;
                             }
                             indices
                         }
-                        None => reorder_indices(&rows, &shown, sort),
+                        RowSource::Reorder(shown) => reorder_indices(&rows, &shown, sort),
                     };
                     if is_refiltered && let Some((col, use_numeric, direction)) = sort {
                         indices = sort_indices(&rows, &indices, col, use_numeric, direction);
@@ -432,6 +441,10 @@ impl CsvrApp {
             is_refiltered,
             scroll,
         } = result;
+        // This runs inside the task itself, so detach rather than drop it; either way it ends here.
+        if let Some(task) = self.filter_task.take() {
+            task.detach();
+        }
         let (previous, top) = self.anchor_view();
         let selected = self
             .selected_cell
@@ -474,6 +487,11 @@ impl CsvrApp {
             self.recompute_chart_data();
         }
         cx.notify();
+    }
+
+    /// Whether a filter task is still running, so the shown rows may not match the queries yet.
+    fn is_filtering(&self) -> bool {
+        self.filter_task.is_some()
     }
 
     fn set_search_query(&mut self, query: String, cx: &mut Context<Self>) {
@@ -710,7 +728,20 @@ impl CsvrApp {
         cx.write_to_clipboard(ClipboardItem::new_string(text));
     }
 
+    /// Exports would otherwise copy the rows from before the latest query, which the user is
+    /// likely to take for the filtered result.
+    fn is_ready_to_export(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.is_filtering() {
+            self.show_status_message("Still filtering. Export again when it finishes", cx);
+            return false;
+        }
+        true
+    }
+
     fn export_json(&mut self, cx: &mut Context<Self>) {
+        if !self.is_ready_to_export(cx) {
+            return;
+        }
         let text = export_json(
             &self.raw_headers,
             &self.rows,
@@ -721,6 +752,9 @@ impl CsvrApp {
     }
 
     fn export_markdown(&mut self, cx: &mut Context<Self>) {
+        if !self.is_ready_to_export(cx) {
+            return;
+        }
         let text = export_markdown(
             &self.raw_headers,
             &self.rows,
@@ -901,6 +935,12 @@ impl Render for CsvrApp {
         let row_width = px(content_width.max(viewport_width));
         let filtered_count = self.filtered_indices.len();
         let total_count = self.rows.len();
+        // The count is from the last result, so say when a newer one is still on its way.
+        let rows_text = if self.is_filtering() {
+            format!("{} / {} rows (filtering...)", filtered_count, total_count)
+        } else {
+            format!("{} / {} rows", filtered_count, total_count)
+        };
 
         div()
             .track_focus(&self.focus_handle(cx))
@@ -1363,7 +1403,7 @@ impl Render for CsvrApp {
                                 .child(if self.row_filter_error {
                                     "invalid regex".to_string()
                                 } else {
-                                    format!("{} / {} rows", filtered_count, total_count)
+                                    rows_text.clone()
                                 }),
                         ),
                 )
@@ -1403,7 +1443,7 @@ impl Render for CsvrApp {
                             div()
                                 .text_color(rgb(TEXT_SUBTEXT))
                                 .text_xs()
-                                .child(format!("{} / {} rows", filtered_count, total_count)),
+                                .child(rows_text.clone()),
                         ),
                 )
             })
@@ -1679,7 +1719,7 @@ impl Render for CsvrApp {
                         let vis_cols = self.visible_col_indices.len();
                         let total_cols = self.raw_headers.len();
                         let pinned = self.pinned_col_count.min(vis_cols);
-                        let mut parts = vec![format!("{} / {} rows", filtered_count, total_count)];
+                        let mut parts = vec![rows_text.clone()];
                         if vis_cols < total_cols {
                             parts.push(format!("{} / {} cols", vis_cols, total_cols));
                         }

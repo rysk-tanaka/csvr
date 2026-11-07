@@ -71,17 +71,20 @@ pub(crate) fn h_offset_to_reveal(
 /// so the result can be anchored to whatever the view shows when it arrives with lookups only,
 /// even if the user scrolled or changed the selection while the task ran.
 pub(crate) struct RowPositions {
-    /// Indexed by original row; `NOT_SHOWN` for rows the order leaves out.
-    positions: Vec<usize>,
+    /// Indexed by original row; `NOT_SHOWN` for rows the order leaves out. `u32` halves the
+    /// size, since this has an entry for every row in the file and is rebuilt on each keystroke.
+    positions: Vec<u32>,
     len: usize,
 }
 
 impl RowPositions {
-    const NOT_SHOWN: usize = usize::MAX;
+    const NOT_SHOWN: u32 = u32::MAX;
 
     pub(crate) fn new(order: &[usize], row_count: usize) -> Self {
         let mut positions = vec![Self::NOT_SHOWN; row_count];
         for (pos, &row) in order.iter().enumerate() {
+            // Positions past u32 would need more rows than fit in memory as strings.
+            let Ok(pos) = u32::try_from(pos) else { break };
             if let Some(slot) = positions.get_mut(row) {
                 *slot = pos;
             }
@@ -98,6 +101,7 @@ impl RowPositions {
             .get(row)
             .copied()
             .filter(|&pos| pos != Self::NOT_SHOWN)
+            .map(|pos| pos as usize)
     }
 }
 

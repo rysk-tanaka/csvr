@@ -82,20 +82,20 @@ pub(crate) fn key_bindings(modifiers: &[ShortcutModifier]) -> Vec<KeyBinding> {
 }
 
 // Catppuccin Mocha palette
-const BG_BASE: u32 = 0x1e1e2e;
-const TEXT_MAIN: u32 = 0xcdd6f4;
-const TEXT_SUBTEXT: u32 = 0xa6adc8;
-const BORDER_COLOR: u32 = 0x45475a;
+pub(crate) const BG_BASE: u32 = 0x1e1e2e;
+pub(crate) const TEXT_MAIN: u32 = 0xcdd6f4;
+pub(crate) const TEXT_SUBTEXT: u32 = 0xa6adc8;
+pub(crate) const BORDER_COLOR: u32 = 0x45475a;
 const HEADER_BG: u32 = 0x181825;
 const ROW_ALT_BG: u32 = 0x1e1e2e; // Base
 const ROW_EVEN_BG: u32 = 0x11111b; // Crust (darker for contrast)
-const SEARCH_BG: u32 = 0x313244; // Surface0
-const SURFACE1: u32 = 0x45475a;
+pub(crate) const SEARCH_BG: u32 = 0x313244; // Surface0
+pub(crate) const SURFACE1: u32 = 0x45475a;
 const ROW_HOVER_BG: u32 = 0x27273a; // Between Base and Surface0 — hover
 const ROW_SELECTED_BG: u32 = 0x313244; // Surface0 — selected row
 const CELL_SELECTED_BG: u32 = 0x45475a; // Surface1 — selected cell
 const STATUS_BG: u32 = HEADER_BG;
-const TEXT_ERROR: u32 = 0xf38ba8; // Catppuccin Red
+pub(crate) const TEXT_ERROR: u32 = 0xf38ba8; // Catppuccin Red
 const TEXT_WARNING: u32 = 0xf9e2af; // Catppuccin Yellow
 const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 /// Separates clipped columns from the row numbers, where a cut-off value can read as part of the
@@ -105,7 +105,7 @@ const PINNED_BORDER_WIDTH: f32 = 1.0;
 const CARET_WIDTH: f32 = 1.0;
 /// The table's font. The column widths are measured with it, so the sizes below are both drawn
 /// and measured: `text_sm` for the cells and the row numbers, bold `text_xs` for the header.
-const TABLE_FONT_FAMILY: &str = ".SystemUIFont";
+pub(crate) const TABLE_FONT_FAMILY: &str = ".SystemUIFont";
 const CELL_TEXT_SIZE: Rems = Rems(0.875);
 const HEADER_TEXT_SIZE: Rems = Rems(0.75);
 const HEADER_FONT_WEIGHT: FontWeight = FontWeight::BOLD;

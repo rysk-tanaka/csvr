@@ -1,4 +1,5 @@
-//! Browser entry point (gpui_web). It shows a built-in sample until a file is dropped on the page.
+//! Browser entry point (gpui_web). It shows the welcome screen (`welcome`) until a file or the
+//! sample opens.
 
 use std::borrow::Cow;
 use std::cell::Cell;
@@ -12,17 +13,9 @@ use wasm_bindgen::closure::Closure;
 
 use csvr_core::data::{CsvData, SpreadsheetFormat, decode_to_utf8};
 
-use crate::app::{CsvrApp, KEY_CONTEXT, OpenFile, ShortcutModifier, key_bindings};
+use crate::app::{KEY_CONTEXT, OpenFile, ShortcutModifier, key_bindings};
 use crate::browser::js_error;
-
-const SAMPLE_CSV: &str = "\
-名前,部署,年齢,売上
-田中,営業,34,1200
-佐藤,開発,28,860
-鈴木,営業,45,1530
-高橋,総務,39,720
-伊藤,開発,31,990
-";
+use crate::welcome::{WELCOME_KEY_CONTEXT, WebRoot};
 
 /// A font downloaded when the bundled one lacks a character.
 struct FontFile {
@@ -85,20 +78,23 @@ pub(crate) fn run() {
             ShortcutModifier::Ctrl,
         ]));
         // Only the browser build opens files from the app. GPUI prevents the browser's own
-        // shortcut for keys it handles, so the browser's open dialog does not appear too. While
-        // the IME is composing these do not apply, like the other bindings (opening a file would
-        // drop the composition); gpui_web then prevents the browser's shortcut for every key.
+        // shortcut for keys it handles, so the browser's open dialog does not appear too. On the
+        // table these do not apply while the IME is composing, like the other bindings: opening
+        // a file would drop the composition, and gpui_web then prevents the browser's shortcut for
+        // every key. The welcome screen has no text input, so a composition there goes nowhere
+        // and these apply even while one is open.
         cx.bind_keys([
             KeyBinding::new("cmd-o", OpenFile, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-o", OpenFile, Some(KEY_CONTEXT)),
+            KeyBinding::new("cmd-o", OpenFile, Some(WELCOME_KEY_CONTEXT)),
+            KeyBinding::new("ctrl-o", OpenFile, Some(WELCOME_KEY_CONTEXT)),
         ]);
 
-        let sample = CsvData::from_reader(SAMPLE_CSV.as_bytes()).expect("the sample CSV is valid");
         let window = cx.open_window(WindowOptions::default(), |window, cx| {
-            let entity = cx.new(|cx| CsvrApp::new(sample, window, cx));
-            let focus = entity.read(cx).focus_handle.clone();
+            let root = cx.new(WebRoot::new);
+            let focus = root.read(cx).welcome_focus().clone();
             window.focus(&focus, cx);
-            entity
+            root
         });
         match window {
             Ok(window) => {
@@ -112,8 +108,8 @@ pub(crate) fn run() {
 }
 
 /// Loads IBM Plex Sans JP the first time some text has a character no font can draw. The two weights
-/// together are about 7MB to download (11MB uncompressed), and the sample alone never needs them:
-/// gpui_web draws CJK with the browser's font and does not report it as missing.
+/// together are about 7MB to download (11MB uncompressed), and the welcome screen and the sample
+/// never need them: gpui_web draws CJK with the browser's font and does not report it as missing.
 fn load_japanese_font_on_missing_glyphs(cx: &mut App) {
     // Only one attempt per page. Each new character is reported, and so are characters the
     // Japanese font lacks too, so a failed or useless download would otherwise be repeated.
@@ -155,10 +151,15 @@ async fn load_japanese_font(cx: &mut AsyncApp) {
         }
         // The column widths were measured with the missing glyphs' width.
         for window in cx.windows() {
-            let Some(window) = window.downcast::<CsvrApp>() else {
+            let Some(window) = window.downcast::<WebRoot>() else {
                 continue;
             };
-            if let Err(e) = window.update(cx, |app, window, _| app.remeasure_columns(window)) {
+            let remeasured = window.update(cx, |root, window, cx| {
+                if let Some(table) = root.table() {
+                    table.update(cx, |app, _| app.remeasure_columns(window));
+                }
+            });
+            if let Err(e) = remeasured {
                 log::error!("failed to measure the columns again: {e:#}");
             }
         }
@@ -196,27 +197,29 @@ async fn fetch_bytes(url: &str, integrity: &str) -> Result<Vec<u8>, String> {
 }
 
 /// Opens files the user gives the page, by dropping them or with the file picker, in place of
-/// the table.
+/// the welcome screen or the table. `WebRoot` numbers the loads, so that only the latest shows.
 struct FileOpener {
-    window: WindowHandle<CsvrApp>,
+    window: WindowHandle<WebRoot>,
     cx: AsyncApp,
-    /// Reads finish in any order, so only the latest file may replace the table. Otherwise a
-    /// large file given first could finish last and cover the file the user picked afterwards.
-    latest: Cell<u64>,
 }
 
 impl FileOpener {
-    fn new(window: WindowHandle<CsvrApp>, cx: AsyncApp) -> Self {
-        Self {
-            window,
-            cx,
-            latest: Cell::new(0),
-        }
+    fn new(window: WindowHandle<WebRoot>, cx: AsyncApp) -> Self {
+        Self { window, cx }
     }
 
     fn open(self: &Rc<Self>, file: web_sys::File) {
-        let id = self.latest.get() + 1;
-        self.latest.set(id);
+        let mut cx = self.cx.clone();
+        let id = match self
+            .window
+            .update(&mut cx, |root, _, cx| root.start_load(cx))
+        {
+            Ok(id) => id,
+            Err(e) => {
+                log::error!("failed to open '{}': {e:#}", file.name());
+                return;
+            }
+        };
         let opener = Rc::clone(self);
         wasm_bindgen_futures::spawn_local(async move { opener.read_and_show(file, id).await });
     }
@@ -233,48 +236,57 @@ impl FileOpener {
         // Checked before loading: decoding and parsing run on the only thread, so a file that
         // is already replaced would freeze the page for nothing. `load` has no await, so no
         // newer file can arrive between this check and the update below.
-        if self.latest.get() != id {
-            log::info!("'{name}' was replaced by a later file before it finished reading");
+        if !self.is_latest(id) {
+            log::info!(
+                "'{name}' was replaced by a later file or the sample before it finished reading"
+            );
             return;
         }
         let data = match load(&name, bytes) {
             Ok(data) => data,
-            // Keep the current table: a failed file should not leave the page empty.
+            // Keep the current screen: a failed file should not leave the page empty.
             Err(e) => {
                 self.report_failure(id, format!("Failed to open '{name}': {e}"));
                 return;
             }
         };
         let mut cx = self.cx.clone();
-        let replaced = self.window.update(&mut cx, |app, window, cx| {
-            *app = CsvrApp::new(data, window, cx);
-            window.focus(&app.focus_handle, cx);
-            cx.notify();
+        let replaced = self.window.update(&mut cx, |root, window, cx| {
+            root.show_table(data, window, cx)
         });
-        // Only when the window is gone, so there is no status bar to show it in.
+        // Only when the window is gone, so there is nowhere to show it.
         if let Err(e) = replaced {
             log::error!("failed to show '{name}': {e:#}");
         }
     }
 
-    /// Shows why a file did not open in the status bar, as well as the console: the user picked
-    /// or dropped it on the page and would otherwise see nothing happen. A file already replaced
-    /// by a later one only goes to the console, so its message does not cover the later file.
+    /// Shows why a file did not open on the welcome screen or in the table's status bar, as well
+    /// as the console: the user picked or dropped it on the page and would otherwise see nothing
+    /// happen. A file already replaced by a later one only goes to the console, so its message
+    /// does not cover the later file.
     fn report_failure(&self, id: u64, message: String) {
         log::error!("{message}");
         // The status bar is one line, and GPUI breaks lines at newlines even with
         // `whitespace_nowrap`; file names and loader errors can contain them.
         let message = message.replace(['\r', '\n'], " ");
-        if self.latest.get() != id {
+        if !self.is_latest(id) {
             return;
         }
         let mut cx = self.cx.clone();
         let shown = self
             .window
-            .update(&mut cx, |app, _, cx| app.show_status_message(message, cx));
+            .update(&mut cx, |root, _, cx| root.show_message(message, cx));
         if let Err(e) = shown {
             log::error!("failed to show the error: {e:#}");
         }
+    }
+
+    /// Whether no other file or the sample was opened after load `id`. False also when the window
+    /// is gone, as there is then nothing to show the file in.
+    fn is_latest(&self, id: u64) -> bool {
+        self.window
+            .read_with(&self.cx, |root, _| root.is_latest_load(id))
+            .unwrap_or(false)
     }
 }
 

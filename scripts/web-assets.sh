@@ -95,6 +95,29 @@ cp THIRD_PARTY_LICENSES.html "$TRUNK_STAGING_DIR/licenses/THIRD_PARTY_LICENSES.h
 cp assets/fonts/ibm-plex-sans/license.txt "$TRUNK_STAGING_DIR/licenses/IBM-Plex-OFL.txt"
 # The favicon is the app icon, based on a Lucide icon.
 cp assets/LICENSE "$TRUNK_STAGING_DIR/licenses/icon-LICENSE.txt"
+# The welcome screen's link opens /licenses/. No inline script or style, so the CSP stays as it is;
+# the color-scheme meta lets the browser follow a dark theme without one.
+cat > "$TRUNK_STAGING_DIR/licenses/index.html" <<'HTML'
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>ライセンス - csvr</title>
+  </head>
+  <body>
+    <h1>ライセンス</h1>
+    <ul>
+      <li><a href="csvr-LICENSE.txt">csvr</a>（MIT）</li>
+      <li><a href="THIRD_PARTY_LICENSES.html">依存クレート</a></li>
+      <li><a href="IBM-Plex-OFL.txt">IBM Plex Sans / IBM Plex Sans JP</a>（OFL）</li>
+      <li><a href="icon-LICENSE.txt">アイコン</a>（Lucide、ISC）</li>
+    </ul>
+    <p><a href="../">csvr を開く</a></p>
+  </body>
+</html>
+HTML
 
 # Trunk keeps its lock file in the output directory; wrangler would otherwise publish it.
 printf '.trunk-lock\n' > "$TRUNK_STAGING_DIR/.assetsignore"

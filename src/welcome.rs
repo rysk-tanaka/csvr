@@ -82,9 +82,14 @@ impl WebRoot {
         &self.welcome_focus
     }
 
-    /// Starts a load and returns its number. Loads started before it no longer show.
-    pub(crate) fn start_load(&mut self) -> u64 {
+    /// Starts a load and returns its number. Loads started before it no longer show. It also
+    /// clears the last failure, which would otherwise stay on the welcome screen while the next
+    /// file is read and look like that file failed.
+    pub(crate) fn start_load(&mut self, cx: &mut Context<Self>) -> u64 {
         self.latest_load += 1;
+        if self.message.take().is_some() {
+            cx.notify();
+        }
         self.latest_load
     }
 
@@ -129,7 +134,7 @@ impl WebRoot {
 
     fn open_sample(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A file still being read must not replace the sample when it finishes.
-        self.start_load();
+        self.start_load(cx);
         let sample = CsvData::from_reader(SAMPLE_CSV.as_bytes()).expect("the sample CSV is valid");
         self.show_table(sample, window, cx);
     }
@@ -239,7 +244,8 @@ impl WebRoot {
     }
 }
 
-/// The same look as the table's Open file button.
+/// The colors and hover of the table's Open file button, with more padding for the welcome
+/// screen.
 fn button(id: &'static str, label: &'static str) -> gpui::Stateful<gpui::Div> {
     div()
         .id(id)

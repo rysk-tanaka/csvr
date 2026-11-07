@@ -78,9 +78,11 @@ pub(crate) fn run() {
             ShortcutModifier::Ctrl,
         ]));
         // Only the browser build opens files from the app. GPUI prevents the browser's own
-        // shortcut for keys it handles, so the browser's open dialog does not appear too. While
-        // the IME is composing these do not apply, like the other bindings (opening a file would
-        // drop the composition); gpui_web then prevents the browser's shortcut for every key.
+        // shortcut for keys it handles, so the browser's open dialog does not appear too. On the
+        // table these do not apply while the IME is composing, like the other bindings: opening
+        // a file would drop the composition, and gpui_web then prevents the browser's shortcut for
+        // every key. The welcome screen has no text input, so a composition there goes nowhere
+        // and these apply even while one is open.
         cx.bind_keys([
             KeyBinding::new("cmd-o", OpenFile, Some(KEY_CONTEXT)),
             KeyBinding::new("ctrl-o", OpenFile, Some(KEY_CONTEXT)),
@@ -208,7 +210,10 @@ impl FileOpener {
 
     fn open(self: &Rc<Self>, file: web_sys::File) {
         let mut cx = self.cx.clone();
-        let id = match self.window.update(&mut cx, |root, _, _| root.start_load()) {
+        let id = match self
+            .window
+            .update(&mut cx, |root, _, cx| root.start_load(cx))
+        {
             Ok(id) => id,
             Err(e) => {
                 log::error!("failed to open '{}': {e:#}", file.name());

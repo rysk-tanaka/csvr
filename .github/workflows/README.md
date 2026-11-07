@@ -38,7 +38,7 @@ GPUI が Metal を必要とするため、macOS ランナーで実行。ただ�
 
 | Workflow | Status | 主目的 | トリガー |
 | --- | --- | --- | --- |
-| [deploy-web.yml](./deploy-web.yml) | [![Deploy Web](https://github.com/rysk-tanaka/csvr/actions/workflows/deploy-web.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/deploy-web.yml) | 本番へのデプロイと、PR のプレビュー（同じリポジトリのブランチで、bot 以外の PR） | `workflow_call` (auto-release), `workflow_dispatch` (main), `pull_request` (main、ブラウザ版に関わるパス) |
+| [deploy-web.yml](./deploy-web.yml) | [![Deploy Web](https://github.com/rysk-tanaka/csvr/actions/workflows/deploy-web.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/deploy-web.yml) | 本番へのデプロイと、PR のプレビュー（同じリポジトリのブランチで、bot 以外の PR。PR に deployment として出る） | `workflow_call` (auto-release), `workflow_dispatch` (main), `pull_request` (main、ブラウザ版に関わるパス) |
 
 ## Issue 自動化
 

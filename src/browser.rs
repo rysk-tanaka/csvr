@@ -7,9 +7,9 @@ use wasm_bindgen::{JsCast, JsValue};
 
 /// Starts writing `text` to the clipboard and returns a future with the result. The write
 /// starts before this returns, so call it inside the user's input event: the browser only allows
-/// it with user activation. The browser refuses outside https and localhost (there is no
-/// `navigator.clipboard` there) and when the page lacks permission, and reports that only
-/// through the promise, which GPUI's `write_to_clipboard` drops.
+/// it with user activation. Outside https and localhost there is no `navigator.clipboard`, so
+/// calling it would throw; this reports that without calling it. When the page lacks
+/// permission, the promise rejects, and GPUI's `write_to_clipboard` drops that promise.
 pub(crate) fn write_clipboard_text(text: &str) -> impl Future<Output = Result<(), String>> + use<> {
     let promise = start_clipboard_write(text);
     async move {

@@ -47,7 +47,7 @@ actions!(
 /// otherwise close the bar under the composition. The view sets `ime_editing` in its key
 /// context (see `render`), and GPUI redraws a changed view before it dispatches the next key,
 /// so the context is current.
-pub(crate) const KEY_CONTEXT: &str = "CsvrApp && !ime_editing";
+const KEY_CONTEXT: &str = "CsvrApp && !ime_editing";
 
 /// Modifier for the table view's shortcuts. The browser build binds both, because its `cmd`
 /// is the Meta key on every OS.
@@ -287,9 +287,6 @@ pub(crate) struct CsvrApp {
     status_message: Option<SharedString>,
     /// Replacing this cancels the previous timer, so a newer message keeps its full duration
     status_message_task: Option<Task<()>>,
-    /// The browser's clipboard write being waited on. A newer copy replaces it.
-    #[cfg(target_family = "wasm")]
-    clipboard_task: Option<Task<()>>,
     headers: Vec<SharedString>,
     /// Original headers (not uppercased) for regex matching and column filter parsing
     raw_headers: Vec<String>,
@@ -406,8 +403,6 @@ impl CsvrApp {
             load_warning,
             status_message: None,
             status_message_task: None,
-            #[cfg(target_family = "wasm")]
-            clipboard_task: None,
             headers,
             raw_headers,
             rows,
@@ -844,7 +839,8 @@ impl CsvrApp {
         #[cfg(target_family = "wasm")]
         {
             let written = crate::browser::write_clipboard_text(&text);
-            self.clipboard_task = Some(cx.spawn(async move |this, cx| {
+            // Detached, so a quick second copy does not drop the first one's result.
+            cx.spawn(async move |this, cx| {
                 let result = written.await;
                 this.update(cx, |this, cx| match result {
                     Ok(()) => {
@@ -855,7 +851,8 @@ impl CsvrApp {
                     Err(e) => this.show_status_message(format!("Copy failed: {e}"), cx),
                 })
                 .ok();
-            }));
+            })
+            .detach();
         }
     }
 
@@ -907,7 +904,11 @@ impl CsvrApp {
         self.write_clipboard(text, Some(message.into()), cx);
     }
 
-    fn show_status_message(&mut self, text: impl Into<SharedString>, cx: &mut Context<Self>) {
+    pub(crate) fn show_status_message(
+        &mut self,
+        text: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+    ) {
         self.status_message = Some(text.into());
         self.status_message_task = Some(cx.spawn(async move |this, cx| {
             cx.background_executor()
@@ -2169,26 +2170,8 @@ impl Render for CsvrApp {
                     .justify_between()
                     .text_xs()
                     .text_color(rgb(TEXT_SUBTEXT))
-                    // The browser build can open files only from the page: a drop, or this
-                    // button and `cmd-o`, which `web` handles.
-                    .when(cfg!(target_family = "wasm"), |el| {
-                        el.child(
-                            div()
-                                .id("open-file")
-                                .flex_shrink_0()
-                                .mr_2()
-                                .px_1()
-                                .rounded_sm()
-                                .bg(rgb(SEARCH_BG))
-                                .text_color(rgb(TEXT_MAIN))
-                                .cursor_pointer()
-                                .hover(|style| style.bg(rgb(SURFACE1)))
-                                .on_click(|_event, window, cx| {
-                                    window.dispatch_action(Box::new(OpenFile), cx);
-                                })
-                                .child("Open file"),
-                        )
-                    })
+                    // One group, so `justify_between` keeps the counts at the left edge with the
+                    // button beside them, whether or not a message or the stats are showing.
                     .child({
                         let vis_cols = self.visible_col_indices.len();
                         let total_cols = self.raw_headers.len();
@@ -2200,7 +2183,31 @@ impl Render for CsvrApp {
                         if pinned > 0 {
                             parts.push(format!("f{}", pinned));
                         }
-                        div().flex_shrink_0().child(parts.join("  "))
+                        div()
+                            .flex_shrink_0()
+                            .flex()
+                            .flex_row()
+                            .items_center()
+                            // The browser build can open files only from the page: a drop, or
+                            // this button and `cmd-o`, which `web` handles.
+                            .when(cfg!(target_family = "wasm"), |el| {
+                                el.child(
+                                    div()
+                                        .id("open-file")
+                                        .mr_2()
+                                        .px_1()
+                                        .rounded_sm()
+                                        .bg(rgb(SEARCH_BG))
+                                        .text_color(rgb(TEXT_MAIN))
+                                        .cursor_pointer()
+                                        .hover(|style| style.bg(rgb(SURFACE1)))
+                                        .on_click(|_event, window, cx| {
+                                            window.dispatch_action(Box::new(OpenFile), cx);
+                                        })
+                                        .child("Open file"),
+                                )
+                            })
+                            .child(parts.join("  "))
                     })
                     // The message and the stats shrink in proportion to their text, so a narrow
                     // window still shows part of both.

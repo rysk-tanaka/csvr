@@ -12,7 +12,7 @@ use wasm_bindgen::closure::Closure;
 
 use csvr_core::data::{CsvData, SpreadsheetFormat, decode_to_utf8};
 
-use crate::app::{CsvrApp, KEY_CONTEXT, OpenFile, ShortcutModifier, key_bindings};
+use crate::app::{CsvrApp, OpenFile, ShortcutModifier, key_bindings};
 use crate::browser::js_error;
 
 const SAMPLE_CSV: &str = "\
@@ -78,10 +78,12 @@ pub(crate) fn run() {
             ShortcutModifier::Ctrl,
         ]));
         // Only the browser build opens files from the app. GPUI prevents the browser's own
-        // shortcut for keys it handles, so the browser's open dialog does not appear too.
+        // shortcut for keys it handles, so the browser's open dialog does not appear too. Unlike
+        // the other bindings, these also apply while the IME is composing: otherwise the key
+        // would reach the browser, whose dialog opens a picked file in place of the page.
         cx.bind_keys([
-            KeyBinding::new("cmd-o", OpenFile, Some(KEY_CONTEXT)),
-            KeyBinding::new("ctrl-o", OpenFile, Some(KEY_CONTEXT)),
+            KeyBinding::new("cmd-o", OpenFile, Some("CsvrApp")),
+            KeyBinding::new("ctrl-o", OpenFile, Some("CsvrApp")),
         ]);
 
         let sample = CsvData::from_reader(SAMPLE_CSV.as_bytes()).expect("the sample CSV is valid");
@@ -217,7 +219,7 @@ impl FileOpener {
         let bytes = match wasm_bindgen_futures::JsFuture::from(file.array_buffer()).await {
             Ok(buffer) => js_sys::Uint8Array::new(&buffer).to_vec(),
             Err(e) => {
-                log::error!("failed to read '{name}': {}", js_error(&e));
+                self.report_failure(id, format!("Failed to read '{name}': {}", js_error(&e)));
                 return;
             }
         };
@@ -232,7 +234,7 @@ impl FileOpener {
             Ok(data) => data,
             // Keep the current table: a failed file should not leave the page empty.
             Err(e) => {
-                log::error!("failed to load '{name}': {e}");
+                self.report_failure(id, format!("Failed to open '{name}': {e}"));
                 return;
             }
         };
@@ -242,8 +244,26 @@ impl FileOpener {
             window.focus(&app.focus_handle, cx);
             cx.notify();
         });
+        // Only when the window is gone, so there is no status bar to show it in.
         if let Err(e) = replaced {
             log::error!("failed to show '{name}': {e:#}");
+        }
+    }
+
+    /// Shows why a file did not open in the status bar, as well as the console: the user picked
+    /// or dropped it on the page and would otherwise see nothing happen. A file already replaced
+    /// by a later one only goes to the console, so its message does not cover the later file.
+    fn report_failure(&self, id: u64, message: String) {
+        log::error!("{message}");
+        if self.latest.get() != id {
+            return;
+        }
+        let mut cx = self.cx.clone();
+        let shown = self
+            .window
+            .update(&mut cx, |app, _, cx| app.show_status_message(message, cx));
+        if let Err(e) = shown {
+            log::error!("failed to show the error: {e:#}");
         }
     }
 }
@@ -281,7 +301,8 @@ fn listen_for_drops(opener: Rc<FileOpener>) {
 }
 
 /// The files the picker offers by default. The user can still pick any file, which opens as CSV.
-const PICKER_ACCEPT: &str = ".csv,.tsv,.txt,.xlsx,.xls,text/csv";
+/// No `.tsv`: csvr reads only commas, so tab-separated files would load as one column.
+const PICKER_ACCEPT: &str = ".csv,.txt,.xlsx,.xls,text/csv";
 
 /// Opens a file picker on `OpenFile` (`cmd-o` / `ctrl-o` or the status bar button). The browser
 /// shows a picker only from an `<input type="file">` clicked during a user's input, and GPUI
@@ -297,8 +318,7 @@ fn listen_for_file_picker(opener: Rc<FileOpener>, cx: &mut App) {
     let on_change = Closure::<dyn FnMut()>::new({
         let input = input.clone();
         move || {
-            // Cancelling the picker fires no change, so there is always a file here unless the
-            // browser reports an empty selection.
+            // Some browsers fire a change with no files when the picker is cancelled.
             if let Some(file) = input.files().and_then(|files| files.get(0)) {
                 opener.open(file);
             }

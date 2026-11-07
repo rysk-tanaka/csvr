@@ -31,7 +31,7 @@ gpui_web = { git = "https://github.com/zed-industries/zed.git", tag = "v1.27.0",
 wasm-bindgen = "0.2.130"
 wasm-bindgen-futures = "0.4.80"
 js-sys = "0.3.107"
-web-sys = { version = "0.3.107", features = ["Window", "Document", "Event", "EventTarget", "DragEvent", "DataTransfer", "FileList", "File", "Blob"] }
+web-sys = { version = "0.3.107", features = ["Window", "Document", "Event", "EventTarget", "DragEvent", "DataTransfer", "FileList", "File", "Blob", "Response", "RequestInit"] }
 log = "0.4.35"
 
 [lints.rust]

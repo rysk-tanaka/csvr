@@ -20,7 +20,7 @@ cargo tarpaulin --skip-clean --out stdout  # カバレッジ計測
 cargo check -p csvr-core --target wasm32-unknown-unknown  # コアの wasm32 ビルド確認（要: rustup target add）
 CARGO_TARGET_WASM32_WASIP1_RUNNER=wasmtime cargo test -p csvr-core --target wasm32-wasip1  # コアのテストを wasm32 で実行（要: wasmtime）
 trunk serve                  # ブラウザ版（試作）を http://127.0.0.1:8080 で起動（要: brew install trunk。設定は Trunk.toml、出力は web/dist）
-cargo check --bin csvr --target wasm32-unknown-unknown  # ブラウザ版のビルド確認
+cargo clippy --bin csvr --target wasm32-unknown-unknown -- -D warnings  # ブラウザ版の lint（ネイティブの clippy は src/web.rs をビルドしない）
 cargo update-licenses                # THIRD_PARTY_LICENSES.html 再生成（要: cargo-about）
 ./scripts/screenshot.sh              # README用スクリーンショット撮影（要: Accessibility許可 / 表示環境）
 ```
@@ -79,7 +79,7 @@ Rust 2024 edition（`edition = "2024"`）を使用。GPUI のバージョンは 
 
 ## CI
 
-ビルド・テスト・lint（`build.yml`, `test.yml`, `lint.yml`）は macOS ランナー（`macos-latest`）で実行。GPUI が Metal を必要とするため Linux では不可。ただし `lint.yml` の `cargo fmt --check` ジョブは Metal 不要のため `ubuntu-latest` で実行。これらのワークフローでは `--locked` フラグを使用（Cargo.lock を厳密に再現）。`cargo fmt` は `--locked` 非対応のため除く。テストと clippy は `default-members` でコアも対象になるが、CI では明示のため `--workspace` を付ける。`test.yml` の wasm32 ジョブ（ubuntu-latest）は、コアを `wasm32-unknown-unknown`（gpui_web と同じターゲット）で `cargo check` し、テストを `wasm32-wasip1` で wasmtime を使って実行する（`usize` が 4 バイトになる環境での確認。wasm32-unknown-unknown でテストを動かすには wasm-bindgen-test が要るため）。ブラウザ版も `cargo check --bin csvr --target wasm32-unknown-unknown` で確かめる。
+ビルド・テスト・lint（`build.yml`, `test.yml`, `lint.yml`）は macOS ランナー（`macos-latest`）で実行。GPUI が Metal を必要とするため Linux では不可。ただし `lint.yml` の `cargo fmt --check` ジョブは Metal 不要のため `ubuntu-latest` で実行。これらのワークフローでは `--locked` フラグを使用（Cargo.lock を厳密に再現）。`cargo fmt` は `--locked` 非対応のため除く。テストと clippy は `default-members` でコアも対象になるが、CI では明示のため `--workspace` を付ける。`test.yml` の wasm32 ジョブ（ubuntu-latest）は、コアを `wasm32-unknown-unknown`（gpui_web と同じターゲット）で `cargo check` し、テストを `wasm32-wasip1` で wasmtime を使って実行する（`usize` が 4 バイトになる環境での確認。wasm32-unknown-unknown でテストを動かすには wasm-bindgen-test が要るため）。ブラウザ版は `cargo clippy --bin csvr --target wasm32-unknown-unknown -- -D warnings` で確かめる（`lint.yml` の clippy はネイティブ版だけで、`src/web.rs` をビルドしないため）。
 
 その他のワークフロー（`claude.yml`, `claude-code-review.yml`, `issue-scan.yml`, `issue-implement.yml`）は `rysk-tanaka/workflows` の reusable workflow を呼び出す薄いラッパーで、ubuntu-latest で動作する。`auto-release.yml` は reusable workflow でリリース作成後、macOS ランナーで `aarch64-apple-darwin` / `x86_64-apple-darwin` のバイナリをビルドしリリースにアップロードする。
 

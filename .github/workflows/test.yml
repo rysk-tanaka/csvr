@@ -34,12 +34,14 @@ jobs:
         with:
           toolchain: stable
           targets: wasm32-unknown-unknown, wasm32-wasip1
+          components: clippy
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - uses: bytecodealliance/actions/wasmtime/setup@9152e710e9f7182e4c29ad218e4f335a7b203613 # v1.1.3
       # The same target as gpui_web
       - run: cargo check -p csvr-core --target wasm32-unknown-unknown --locked
-      # The browser build of the app itself (src/web.rs), so it does not break unnoticed.
-      - run: cargo check --bin csvr --target wasm32-unknown-unknown --locked
+      # The browser build of the app itself. Clippy, because lint.yml only lints the native build
+      # and never compiles src/web.rs.
+      - run: cargo clippy --bin csvr --target wasm32-unknown-unknown --locked -- -D warnings
       # Running tests on wasm32-unknown-unknown needs wasm-bindgen-test, so run them on wasip1,
       # which has the same 4-byte usize.
       - run: cargo test -p csvr-core --target wasm32-wasip1 --locked

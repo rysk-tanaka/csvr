@@ -101,6 +101,13 @@ fn listen_for_drops(window: WindowHandle<CsvrApp>, cx: AsyncApp) {
                         return;
                     }
                 };
+                // Checked before loading: decoding and parsing run on the only thread, so a file
+                // that is already replaced would freeze the page for nothing. `load` has no await,
+                // so no newer drop can arrive between this check and the update below.
+                if latest_drop.get() != drop_id {
+                    log::info!("'{name}' was replaced by a later drop before it finished reading");
+                    return;
+                }
                 let data = match load(&name, bytes) {
                     Ok(data) => data,
                     // Keep the current table: a failed drop should not leave the page empty.
@@ -109,10 +116,6 @@ fn listen_for_drops(window: WindowHandle<CsvrApp>, cx: AsyncApp) {
                         return;
                     }
                 };
-                if latest_drop.get() != drop_id {
-                    log::info!("'{name}' was replaced by a later drop before it finished loading");
-                    return;
-                }
                 let replaced = window.update(&mut cx, |app, window, cx| {
                     *app = CsvrApp::new(data, cx);
                     window.focus(&app.focus_handle, cx);

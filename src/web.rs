@@ -26,25 +26,32 @@ const SAMPLE_CSV: &str = "\
 
 /// A font downloaded when the bundled one lacks a character.
 struct FontFile {
+    /// Relative to the page. `scripts/web-assets.sh` puts the file there when Trunk builds the
+    /// page, so the site serves it itself and opening the page tells no CDN.
     url: &'static str,
-    /// Subresource Integrity hash. The browser rejects the response if the content differs, so a
-    /// compromised CDN cannot hand the page a different font. It also stands in for checking the
-    /// font: `add_fonts` reports success even for bytes it cannot parse, and these bytes are the
-    /// files that were checked when the hashes were taken.
+    /// Subresource Integrity hash, which `scripts/web-assets.sh` also checks after downloading
+    /// the file. The browser rejects the response if the content differs, so a wrong file in the
+    /// output cannot reach the app. It also stands in for checking the font: `add_fonts` reports
+    /// success even for bytes it cannot parse, and these bytes are the files that were checked
+    /// when the hashes were taken.
     integrity: &'static str,
 }
 
 /// IBM Plex Sans JP Regular and SemiBold, the Japanese edition of the bundled IBM Plex Sans. It also
 /// has the symbols the bundled font lacks (full-width letters, ①, ㈱, ▲, ...). The npm package
-/// only ships WOFF and WOFF2, which cosmic-text cannot read, so the TTFs come from GitHub. The URLs
-/// are pinned to the commit of the `@ibm/plex-sans-jp@3.0.0` tag, and the content to its hash.
+/// only ships WOFF and WOFF2, which cosmic-text cannot read, so `scripts/web-assets.sh` takes the
+/// TTFs from GitHub, at the commit of the `@ibm/plex-sans-jp@3.0.0` tag.
+///
+/// `scripts/web-assets.sh` reads the file names and hashes from here, so this is the only place to
+/// change them. It expects each entry as written: a `url: "fonts/..."` line, then its `integrity`
+/// line.
 const IBM_PLEX_SANS_JP: [FontFile; 2] = [
     FontFile {
-        url: "https://cdn.jsdelivr.net/gh/IBM/plex@89cba80dad75561262e758f4b6ddd474c5119796/packages/plex-sans-jp/fonts/complete/ttf/unhinted/IBMPlexSansJP-Regular.ttf",
+        url: "fonts/IBMPlexSansJP-Regular.ttf",
         integrity: "sha384-/yQZjwaTcpaqocYFEcsa32pkb1RuXBjNCLOFAOqOLZ75hLANiYYjiKWMYS7ZOX/4",
     },
     FontFile {
-        url: "https://cdn.jsdelivr.net/gh/IBM/plex@89cba80dad75561262e758f4b6ddd474c5119796/packages/plex-sans-jp/fonts/complete/ttf/unhinted/IBMPlexSansJP-SemiBold.ttf",
+        url: "fonts/IBMPlexSansJP-SemiBold.ttf",
         integrity: "sha384-HsmSeI1bT3Exy/NcxEvE9gmfB11qUzPrmClQYUGzdkCvMIb0Hr9ct1l2VEhYzjua",
     },
 ];
@@ -105,8 +112,8 @@ pub(crate) fn run() {
 }
 
 /// Loads IBM Plex Sans JP the first time some text has a character no font can draw. The two weights
-/// together are about 6MB to download, and the sample alone never needs them: gpui_web draws CJK
-/// with the browser's font and does not report it as missing.
+/// together are about 7MB to download (11MB uncompressed), and the sample alone never needs them:
+/// gpui_web draws CJK with the browser's font and does not report it as missing.
 fn load_japanese_font_on_missing_glyphs(cx: &mut App) {
     // Only one attempt per page. Each new character is reported, and so are characters the
     // Japanese font lacks too, so a failed or useless download would otherwise be repeated.

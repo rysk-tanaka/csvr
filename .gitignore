@@ -13,3 +13,6 @@ target/
 
 # Browser build output (trunk)
 web/dist/
+
+# Local state of `wrangler dev` / `wrangler deploy`
+.wrangler/

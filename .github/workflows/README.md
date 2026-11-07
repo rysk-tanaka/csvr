@@ -30,7 +30,15 @@ GPUI が Metal を必要とするため、macOS ランナーで実行。ただ�
 
 | Workflow | Status | 主目的 | トリガー |
 | --- | --- | --- | --- |
-| [auto-release.yml](./auto-release.yml) | [![Release](https://github.com/rysk-tanaka/csvr/actions/workflows/auto-release.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/auto-release.yml) | `Cargo.toml` のバージョン変更で GitHub Release を作成し、macOS バイナリをアップロード | `push` (main, `Cargo.toml`), `workflow_dispatch` |
+| [auto-release.yml](./auto-release.yml) | [![Release](https://github.com/rysk-tanaka/csvr/actions/workflows/auto-release.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/auto-release.yml) | `Cargo.toml` のバージョン変更で GitHub Release を作成し、macOS バイナリをアップロードし、ブラウザ版を公開 | `push` (main, `Cargo.toml`), `workflow_dispatch` |
+
+## デプロイ
+
+ブラウザ版を Cloudflare Workers（Static Assets）に出す。シークレット `CLOUDFLARE_API_TOKEN` と `CLOUDFLARE_ACCOUNT_ID` が要る。ビルドとデプロイはジョブを分け、シークレットはデプロイのジョブにだけ渡す。
+
+| Workflow | Status | 主目的 | トリガー |
+| --- | --- | --- | --- |
+| [deploy-web.yml](./deploy-web.yml) | [![Deploy Web](https://github.com/rysk-tanaka/csvr/actions/workflows/deploy-web.yml/badge.svg)](https://github.com/rysk-tanaka/csvr/actions/workflows/deploy-web.yml) | 本番へのデプロイと、PR のプレビュー（同じリポジトリのブランチで、bot 以外の PR。PR に deployment として出る） | `workflow_call` (auto-release), `workflow_dispatch` (main), `pull_request` (main、ブラウザ版に関わるパス) |
 
 ## Issue 自動化
 

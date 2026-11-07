@@ -1,0 +1,200 @@
+name: Deploy Web
+
+# Deploys the browser build to Cloudflare Workers Static Assets (wrangler.jsonc).
+# - Production: from auto-release.yml when a release is created, or by hand from main. Not on
+#   every push to main, so automerged GPUI updates are not published before they are checked.
+# - Preview: for pull requests that touch the browser build, uploaded as a version with a
+#   preview alias. It does not change production.
+
+on:
+  workflow_call:
+    secrets:
+      CLOUDFLARE_API_TOKEN:
+        required: true
+      CLOUDFLARE_ACCOUNT_ID:
+        required: true
+  workflow_dispatch:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'crates/**'
+      - 'web/**'
+      - 'assets/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'Trunk.toml'
+      - 'wrangler.jsonc'
+      - 'THIRD_PARTY_LICENSES.html'
+      - 'LICENSE'
+      - 'scripts/web-*'
+      - '.github/workflows/deploy-web.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  # Building runs the build scripts of every crate, so this job gets no Cloudflare secrets.
+  # Only the deploy job, which runs nothing from the build, sees them.
+  build:
+    name: Build
+    # Previews need secrets, which pull requests from forks do not get. Bots' pull requests
+    # (Renovate's dependency updates, automated fixes) get no preview either.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+       github.event.pull_request.user.type != 'Bot')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    concurrency:
+      group: deploy-web-build-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'production' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Validate branch
+        if: github.event_name != 'pull_request' && github.ref != 'refs/heads/main'
+        run: |
+          echo "::error::Production deploys run only from the main branch (current: ${GITHUB_REF})"
+          exit 1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          key: web
+          # The wasm32 target directory is large; caches saved per pull request would push out
+          # the one production deploys use.
+          save-if: ${{ github.event_name != 'pull_request' }}
+      - name: Install trunk
+        env:
+          TRUNK_VERSION: 0.22.1
+          TRUNK_SHA256: 2ab8d548fd5ed9cda50906f61fd8654204e7893bd52ebbfd90533862b7d71ee1
+        run: |
+          archive="$RUNNER_TEMP/trunk.tar.gz"
+          curl --fail --silent --show-error --location --output "$archive" \
+            "https://github.com/trunk-rs/trunk/releases/download/v${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${TRUNK_SHA256}  ${archive}" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/trunk"
+          tar -xzf "$archive" -C "$RUNNER_TEMP/trunk"
+          echo "$RUNNER_TEMP/trunk" >> "$GITHUB_PATH"
+      # The post_build hook (scripts/web-assets.sh) adds the font, the licenses and `_headers`.
+      - run: trunk build --release --locked
+      # With hidden files, so wrangler gets .assetsignore and the deploy publishes what a local
+      # `wrangler deploy` would. .assetsignore keeps Trunk's .trunk-lock out.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: web-dist
+          path: web/dist
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    name: ${{ github.event_name == 'pull_request' && 'Upload preview' || 'Deploy' }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # deployments: write records previews as GitHub deployments, which put a "View deployment"
+    # button on the pull request. It cannot write to the pull request or its comments.
+    permissions:
+      contents: read
+      deployments: write
+    concurrency:
+      group: deploy-web-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'production' }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    steps:
+      # Only wrangler.jsonc, so no other file from the repository (a package.json with install
+      # scripts, an .npmrc) is here while the secrets are. wrangler.jsonc must not get a `build`
+      # command: wrangler would run it in this job.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: wrangler.jsonc
+          sparse-checkout-cone-mode: false
+      # A guard against adding one by mistake. It is not a security boundary: anyone who can push
+      # a branch here can change this workflow in the same pull request.
+      - name: Check wrangler.jsonc has no build command
+        run: |
+          if grep -q '"build"' wrangler.jsonc; then
+            echo "::error file=wrangler.jsonc::wrangler.jsonc must not have a build command; it would run in this job, with the Cloudflare secrets"
+            exit 1
+          fi
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: web-dist
+          path: web/dist
+      - name: Deploy
+        if: github.event_name != 'pull_request'
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4.153.0'
+          command: deploy
+      # A deployment on the pull request's head commit, so the pull request shows it. Previews of
+      # all pull requests share the `preview` environment.
+      - name: Start preview deployment
+        id: deployment
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # required_contexts is empty so the deployment does not wait for this commit's other checks.
+          id=$(jq -n --arg ref "$HEAD_SHA" --arg pr "$PR_NUMBER" '{
+            ref: $ref, environment: "preview", description: ("Preview of PR #" + $pr),
+            auto_merge: false, required_contexts: [],
+            transient_environment: true, production_environment: false
+          }' | gh api "repos/${GITHUB_REPOSITORY}/deployments" --input - --jq .id)
+          gh api "repos/${GITHUB_REPOSITORY}/deployments/${id}/statuses" \
+            -f state=in_progress -f log_url="$RUN_URL" --silent
+          echo "id=${id}" >> "$GITHUB_OUTPUT"
+      - name: Upload preview
+        id: preview
+        if: github.event_name == 'pull_request'
+        uses: cloudflare/wrangler-action@953926a2e2182532811c01a25e53647d93bf07c0 # v4.1.3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          wranglerVersion: '4.153.0'
+          command: versions upload --preview-alias pr-${{ github.event.pull_request.number }}
+      - name: Finish preview deployment
+        if: always() && steps.deployment.outputs.id
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOYMENT_ID: ${{ steps.deployment.outputs.id }}
+          OUTCOME: ${{ steps.preview.outcome }}
+          OUTPUT: ${{ steps.preview.outputs.command-output }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # The alias URL stays the same across pushes to the pull request.
+          url=$(printf '%s\n' "$OUTPUT" | grep -E -o "https://pr-${PR_NUMBER}-[^[:space:]]+\.workers\.dev" | head -n 1 || true)
+          if [ "$OUTCOME" = success ] && [ -n "$url" ]; then
+            state=success
+          else
+            state=failure
+          fi
+          # auto_inactive=false, or each pull request's preview would mark the others inactive.
+          args=(-f state="$state" -f log_url="$RUN_URL" -F auto_inactive=false)
+          if [ -n "$url" ]; then
+            args+=(-f environment_url="$url")
+          fi
+          gh api "repos/${GITHUB_REPOSITORY}/deployments/${DEPLOYMENT_ID}/statuses" "${args[@]}" --silent
+      - name: Show preview URLs
+        if: github.event_name == 'pull_request'
+        env:
+          OUTPUT: ${{ steps.preview.outputs.command-output }}
+        run: |
+          urls=$(printf '%s\n' "$OUTPUT" | grep -E -o 'https://[^[:space:]]+\.workers\.dev[^[:space:]]*' | sort -u || true)
+          {
+            echo "## Preview"
+            echo
+            if [ -n "$urls" ]; then
+              printf '%s\n' "$urls" | sed 's/^/- /'
+            else
+              echo "No preview URL in the output of wrangler."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

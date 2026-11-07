@@ -1,4 +1,6 @@
 mod app;
+#[cfg(target_family = "wasm")]
+mod browser;
 mod chart;
 #[cfg(not(target_family = "wasm"))]
 mod native;

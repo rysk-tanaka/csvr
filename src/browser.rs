@@ -1,0 +1,48 @@
+//! Browser-only helpers shared by the app and the browser entry point. Kept apart from `web` so
+//! the app can use them without depending on `web`, which depends on the app.
+
+use std::future::Future;
+
+use wasm_bindgen::{JsCast, JsValue};
+
+/// Starts writing `text` to the clipboard and returns a future with the result. The write
+/// starts before this returns, so call it inside the user's input event: the browser only allows
+/// it with user activation. Outside https and localhost there is no `navigator.clipboard`, so
+/// calling it would throw; this reports that without calling it. When the page lacks
+/// permission, the promise rejects, and GPUI's `write_to_clipboard` drops that promise.
+pub(crate) fn write_clipboard_text(text: &str) -> impl Future<Output = Result<(), String>> + use<> {
+    let promise = start_clipboard_write(text);
+    async move {
+        let promise = promise?;
+        wasm_bindgen_futures::JsFuture::from(promise)
+            .await
+            .map(|_| ())
+            .map_err(|e| js_error(&e))
+    }
+}
+
+fn start_clipboard_write(text: &str) -> Result<js_sys::Promise, String> {
+    let window = web_sys::window().ok_or("no window")?;
+    let navigator = window.navigator();
+    // `navigator.clipboard` is undefined outside secure contexts, and calling a method on it
+    // would throw.
+    let has_clipboard = js_sys::Reflect::get(navigator.as_ref(), &JsValue::from_str("clipboard"))
+        .is_ok_and(|clipboard| !clipboard.is_undefined() && !clipboard.is_null());
+    if !has_clipboard {
+        return Err("the browser allows copying only on https or localhost".into());
+    }
+    Ok(navigator.clipboard().write_text(text))
+}
+
+/// The message of a JS error, without the stack trace its `Debug` output carries. The status bar
+/// shows it, so a rejection that is not an `Error` gives its text, or a plain description,
+/// rather than the `JsValue(...)` debug form.
+pub(crate) fn js_error(value: &JsValue) -> String {
+    if let Some(error) = value.dyn_ref::<js_sys::Error>() {
+        return String::from(error.message());
+    }
+    if let Some(text) = value.as_string() {
+        return text;
+    }
+    "unknown error".into()
+}

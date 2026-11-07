@@ -38,14 +38,14 @@ GPUI は Metal シェーダーをコンパイルするため、通常の Rust �
 ```text
 src/
   main.rs      -- エントリポイント（load_csv, set_dock_icon, main）
-  data.rs      -- 型定義: CsvData, ChartType, SortDirection, ChartData
+  data.rs      -- 型定義: CsvData, Table, ChartType, SortDirection, ChartData
   compute.rs   -- 純粋計算関数 + テスト
   chart.rs     -- draw_chart + チャートカラー定数
   app.rs       -- CsvrApp, TableRow, UIカラー定数, actions!
 ```
 
-1. **データ層** (`data.rs`) — `CsvData` が入力パースを担当。CSV は `csv` クレートで `std::io::Read` から読み込み（`flexible(true)` でフィールド数不揃いを許容）、xlsx/xls は `calamine` クレートで読み込み（`from_xlsx`）。ヘッダーと行データを `Vec<String>` で保持。メタデータ付きCSV（先頭にkey-value形式のメタデータ行がありデータ本体は途中から始まる形式）では、最頻フィールド数を基にデータヘッダーを自動検出・昇格し、元の行を `metadata` フィールドに保持。`decode_to_utf8` で非 UTF-8 ファイルのエンコーディング自動検出・変換（`chardetng` + `encoding_rs`）。読み込み時の警告は `CsvData.warnings` に集めてステータスバーと stderr に出す。`ChartType`, `SortDirection`, `ChartData`, `ChartAxes` の型定義
-2. **計算層** (`compute.rs`) — テスト可能な純粋関数群。列幅算出、行フィルタリング（`RowFilter`: 部分一致と正規表現を 1 回の走査で判定し、区切って処理できる）、数値列判定、ソート、列フィルタ（正規表現で列名マッチ）、チャート用データ抽出・ダウンサンプリング・ヒストグラムビン計算・軸の範囲と目盛り（`points_axes` / `pairs_axes` / `histogram_axes`）・列統計（`ColumnStats`: count/sum/min/max/mean/median/stddev — stddev は標本標準偏差）、エクスポート（`export_json` / `export_markdown` — 表示中データをクリップボードコピー用に変換）
+1. **データ層** (`data.rs`) — `CsvData` が入力パースを担当。CSV は `csv` クレートで `std::io::Read` から読み込み（`flexible(true)` でフィールド数不揃いを許容）、xlsx/xls は `calamine` クレートで読み込み（`from_xlsx`）。ヘッダーは `Vec<String>`、行データは `Table`（全セルの文字を 1 本の `String` に行順に詰め、セルの区切り位置と行の開始位置を持つ。CSV では `StringRecord` から直接作る）で保持。メタデータ付きCSV（先頭にkey-value形式のメタデータ行がありデータ本体は途中から始まる形式）では、最頻フィールド数を基にデータヘッダーを自動検出・昇格し、元の行を `metadata` フィールドに保持。`decode_to_utf8` で非 UTF-8 ファイルのエンコーディング自動検出・変換（`chardetng` + `encoding_rs`）。読み込み時の警告は `CsvData.warnings` に集めてステータスバーと stderr に出す。`ChartType`, `SortDirection`, `ChartData`, `ChartAxes` の型定義
+2. **計算層** (`compute.rs`) — テスト可能な純粋関数群。列幅算出、行フィルタリング（`RowFilter`: 部分一致と正規表現を 1 回の走査で判定し、区切って処理できる。`/` の部分一致はエスケープしたクエリの case-insensitive な正規表現）、数値列判定、ソート、列フィルタ（正規表現で列名マッチ）、チャート用データ抽出・ダウンサンプリング・ヒストグラムビン計算・軸の範囲と目盛り（`points_axes` / `pairs_axes` / `histogram_axes`）・列統計（`ColumnStats`: count/sum/min/max/mean/median/stddev — stddev は標本標準偏差）、エクスポート（`export_json` / `export_markdown` — 表示中データをクリップボードコピー用に変換）
 3. **チャート描画** (`chart.rs`) — `draw_chart` 関数。GPUI の `canvas` 要素の paint コールバックから呼ばれる。データに加えて凡例（系列の色と列名）と目盛りも描く
 4. **UI 層** (`app.rs`) — `CsvrApp`（`Render` トレイト実装）がメインビュー。`TableRow`（`RenderOnce` / `IntoElement`）が個別行。本体は `uniform_list` による仮想スクロール。カラーテーマは Catppuccin Mocha（`BG_BASE`, `TEXT_MAIN` 等の定数で管理）。`/`（検索）・`*`（列フィルタ）・`f`（列固定）・`&`（行フィルタ）の入力モードは排他制御（`any_input_active()` で判定）。`m`（メタデータ表示トグル）は入力モードではなく単純なトグル
 
@@ -78,6 +78,7 @@ Rust 2024 edition（`edition = "2024"`）を使用。GPUI のバージョンは 
 
 ## 既知の設計トレードオフ
 
-- **エンコーディング検出とメモリ**: `load_csv` のファイル読み込みは `std::fs::read` で全量バッファリングしてからエンコーディング検出を行う。UTF-8 と判明した場合はバッファを drop しファイルを再オープンしてストリーミング読み込み（再オープン失敗時はバッファにフォールバック）。非 UTF-8 の場合もトランスコード後にバッファを drop。最終メモリ使用量は `CsvData` が全行保持するため変わらないが、ピーク時の同時バッファ保持を回避
+- **エンコーディング検出とメモリ**: `load_csv` のファイル読み込みは `std::fs::read` で全量バッファリングしてからエンコーディング検出を行う。UTF-8 と判明した場合はバッファを drop しファイルを再オープンしてストリーミング読み込み（再オープン失敗時はバッファにフォールバック）。非 UTF-8 の場合もトランスコード後にバッファを drop。最終メモリ使用量は `CsvData` が全行保持するため変わらないが、ピーク時の同時バッファ保持を回避。行データはセルごとに `String` を持たず `Table` に詰めるが、セルごとに区切り位置（`usize`: ネイティブ版 8 バイト、wasm32 4 バイト）を持つので、小さいセルが多い CSV ではファイルの数倍になる（100 万行 × 10 列・42.5MB の CSV で読み込み後 約 158MB。変更前は約 522MB。wasm32 は未計測）。`Table` の文字列は伸ばすたびに広い領域へ移るので読み込み中は一時的に増えるが、同じ CSV での最大と読み込み後の差は 10MB 未満だった。xlsx は calamine の `Range`（シート全体）と作っている途中の `Table` が同時にメモリにある
+- **`/` 検索の大文字小文字の比べ方**: `/` はエスケープしたクエリを case-insensitive な正規表現で比べる（セルごとの `to_lowercase` を避けるため）。Unicode の単純な折りたたみなので、`to_lowercase` とは少し結果が違う（İ は `i` にマッチせず、語末の Σ は `σ` にマッチする）
 - **不正なバイトを含む入力の扱い**: UTF-8 の BOM がある場合と、3 バイト以上の文字数が不正箇所の 4 倍以上ある場合は UTF-8 とみなして U+FFFD に置き換える。それ以外は正しい Shift_JIS などと区別できないため文字コードの推定に任せ、推定した文字コード名を stderr に出す。短い破損入力は文字化けすることがある
 - **数値列判定の過半数ベースとソート**: `compute_numeric_columns` は非空値の過半数が `f64` にパース可能なら数値列と判定する。これはメタデータ混在CSVでチャートを利用可能にするための変更だが、通常CSVで混在列（例: `E001, 100, 200`）が意図せず数値ソートされ、テキスト値が `NEG_INFINITY` 扱いで最小値側に配置されるリスクがある

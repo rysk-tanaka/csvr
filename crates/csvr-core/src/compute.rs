@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use regex::{Regex, RegexBuilder};
+use unicode_width::UnicodeWidthStr;
 
 use crate::data::{ChartAxes, ChartAxis, ChartType, CsvData, Row, SortDirection, Table};
 
-/// Pixel width per character (monospace approximation at text_sm)
+/// Pixel width per halfwidth character (monospace approximation at text_sm)
 pub(crate) const CHAR_WIDTH: f32 = 7.5;
 pub(crate) const MIN_COL_WIDTH: f32 = 50.0;
 pub(crate) const MAX_COL_WIDTH: f32 = 400.0;
@@ -18,16 +19,20 @@ pub fn compute_column_widths(data: &CsvData) -> Vec<f32> {
         .iter()
         .enumerate()
         .map(|(col_idx, header)| {
-            let max_len = (0..sample_count)
+            // Fullwidth glyphs are about 14px, so counting them as one character cuts them off.
+            // `width_cjk` also counts East Asian Ambiguous symbols (① ※ ★) as 2, because the
+            // Japanese font draws them fullwidth. Ambiguous letters such as Greek stay at 1:
+            // the Latin fonts (the system font natively, IBM Plex Sans in the browser) have them.
+            let max_columns = (0..sample_count)
                 .map(|r| {
                     data.rows
                         .cell(r, col_idx)
-                        .map_or(0, |cell| cell.chars().count())
+                        .map_or(0, |cell| cell.width_cjk())
                 })
                 .max()
                 .unwrap_or(0)
-                .max(header.to_uppercase().chars().count());
-            (max_len as f32 * CHAR_WIDTH + COL_PADDING).clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
+                .max(header.to_uppercase().width_cjk());
+            (max_columns as f32 * CHAR_WIDTH + COL_PADDING).clamp(MIN_COL_WIDTH, MAX_COL_WIDTH)
         })
         .collect()
 }
@@ -1057,6 +1062,44 @@ mod tests {
         let widths = compute_column_widths(&data);
         assert_eq!(widths.len(), 3);
         assert!((widths[2] - MIN_COL_WIDTH).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_fullwidth_counts_as_two() {
+        let data = make_csv_data(&["品名"], &[&["ＡＢＣ"]]);
+        let widths = compute_column_widths(&data);
+        assert!((widths[0] - (6.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_halfwidth_kana_counts_as_one() {
+        let kana = make_csv_data(&["a"], &[&["ｱｲｳｴｵｶｷｸ"]]);
+        let ascii = make_csv_data(&["a"], &[&["abcdefgh"]]);
+        let kana_width = compute_column_widths(&kana)[0];
+        assert!((kana_width - compute_column_widths(&ascii)[0]).abs() < 0.01);
+        assert!((kana_width - (8.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_ambiguous_symbols_count_as_two() {
+        let data = make_csv_data(&["a"], &[&["①※"]]);
+        let widths = compute_column_widths(&data);
+        assert!((widths[0] - (4.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_greek_counts_as_one() {
+        // Greek is East Asian Ambiguous, but the Latin fonts draw it halfwidth.
+        let data = make_csv_data(&["a"], &[&["αβγδεζηθ"]]);
+        let widths = compute_column_widths(&data);
+        assert!((widths[0] - (8.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
+    }
+
+    #[test]
+    fn column_widths_fullwidth_header_longer_than_data() {
+        let data = make_csv_data(&["品名区分備考"], &[&["x"]]);
+        let widths = compute_column_widths(&data);
+        assert!((widths[0] - (12.0 * CHAR_WIDTH + COL_PADDING)).abs() < 0.01);
     }
 
     // --- row_number_col_width ---

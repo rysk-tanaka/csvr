@@ -9,3 +9,13 @@ dist = "web/dist"
 # By default only the HTML file's directory is watched. `web/` itself is not listed, because the
 # output in `web/dist` would then trigger rebuilds of its own.
 watch = ["src", "crates/csvr-core/src", "assets", "web/index.html", "Cargo.toml", "Cargo.lock"]
+
+[tools]
+# Pinned so CI and local builds optimize the wasm the same way.
+wasm_opt = "version_131"
+
+# Adds the Japanese font and the licenses to the output.
+[[hooks]]
+stage = "post_build"
+command = "sh"
+command_arguments = ["scripts/web-assets.sh"]

@@ -112,7 +112,7 @@ pub(crate) fn run() {
 }
 
 /// Loads IBM Plex Sans JP the first time some text has a character no font can draw. The two weights
-/// together are about 11MB, and the sample alone never needs them: gpui_web draws CJK
+/// together are about 7MB to download (11MB uncompressed), and the sample alone never needs them: gpui_web draws CJK
 /// with the browser's font and does not report it as missing.
 fn load_japanese_font_on_missing_glyphs(cx: &mut App) {
     // Only one attempt per page. Each new character is reported, and so are characters the

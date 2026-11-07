@@ -1,0 +1,11 @@
+# Browser build of csvr (prototype). Run `trunk serve` at the repository root.
+
+[build]
+target = "web/index.html"
+# Trunk writes to `dist/` under the working directory by default.
+dist = "web/dist"
+
+[watch]
+# By default only the HTML file's directory is watched. `web/` itself is not listed, because the
+# output in `web/dist` would then trigger rebuilds of its own.
+watch = ["src", "crates/csvr-core/src", "assets", "web/index.html", "Cargo.toml", "Cargo.lock"]

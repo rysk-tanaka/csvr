@@ -85,6 +85,18 @@ csvr data.xlsx
 cat data.csv | csvr
 ```
 
+### ブラウザ版（試作）
+
+ブラウザで動く試作版を Cloudflare Workers で公開しています。
+ファイルはブラウザの中で読み込み、どこにも送りません。
+
+- ファイルを開く — ページにドロップするか、ステータスバーの Open file か `Cmd+O` / `Ctrl+O`
+- 対応形式 — CSV / xlsx / xls（タブ区切りは未対応）
+- 大きいファイルでは、読み込みとソートのあいだ画面が止まります
+- 日本語や記号が初めて出たときに、日本語フォント（約 11MB）を同じサイトから読み込みます
+
+公開しているファイルのライセンスは `/licenses/` にあります（`csvr-LICENSE.txt`、`THIRD_PARTY_LICENSES.html`、`IBM-Plex-OFL.txt`、`icon-LICENSE.txt`）。
+
 ---
 
 ## 開発

@@ -1,13 +1,13 @@
-use std::{ops::Range, rc::Rc, sync::Arc, time::Duration};
+use std::{collections::HashMap, ops::Range, rc::Rc, sync::Arc, time::Duration};
 
 use futures_lite::future::yield_now;
 
 use gpui::{
     App, Bounds, ClipboardItem, ContentMask, Context, ElementInputHandler, Entity,
-    EntityInputHandler, FocusHandle, Focusable, KeyBinding, KeyDownEvent, Keystroke,
-    ListHorizontalSizingBehavior, Pixels, Render, SharedString, Task, TextAlign, TextRun,
+    EntityInputHandler, FocusHandle, Focusable, Font, Hsla, KeyBinding, KeyDownEvent, Keystroke,
+    ListHorizontalSizingBehavior, Pixels, Rems, Render, SharedString, Task, TextAlign, TextRun,
     UTF16Selection, UnderlineStyle, UniformListScrollHandle, Window, actions, canvas, div, fill,
-    point, prelude::*, px, rems, rgb, uniform_list,
+    point, prelude::*, px, rgb, uniform_list,
 };
 use regex::RegexBuilder;
 
@@ -16,8 +16,8 @@ use csvr_core::compute::{
     chart_legend, clamp_h_offset, compute_column_stats, compute_column_widths,
     compute_histogram_bins, compute_numeric_columns, copied_status_message, downsample,
     export_json, export_markdown, extract_column_values, extract_scatter_pairs,
-    filter_columns_by_regex, h_offset_to_reveal, histogram_axes, pairs_axes, parse_column_filter,
-    points_axes, reorder_indices, row_number_col_width, sort_indices,
+    filter_columns_by_regex, h_offset_to_reveal, histogram_axes, measurable_by_pairs, pairs_axes,
+    parse_column_filter, points_axes, reorder_indices, row_number_col_width, sort_indices,
 };
 use csvr_core::data::{
     CHART_TYPES, ChartAxes, ChartData, ChartType, CsvData, SortDirection, Table,
@@ -97,6 +97,13 @@ const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 const PINNED_BORDER_WIDTH: f32 = 1.0;
 /// Width of the caret in the `/`, `*` and `&` bars.
 const CARET_WIDTH: f32 = 1.0;
+/// The table's font. The column widths are measured with it, so the sizes below are both drawn
+/// and measured: `text_sm` for the cells and the row numbers, bold `text_xs` for the header.
+const TABLE_FONT_FAMILY: &str = ".SystemUIFont";
+const CELL_TEXT_SIZE: Rems = Rems(0.875);
+const HEADER_TEXT_SIZE: Rems = Rems(0.75);
+/// The `ml_0p5` gap before the sort indicator.
+const SORT_INDICATOR_GAP: Rems = Rems(0.125);
 /// Rows a filter task checks between yields. Small enough that a replaced task stops soon and a
 /// single-threaded browser build (gpui_web, `src/web.rs`), which runs background tasks on the UI
 /// thread, still handles input; large enough that yielding costs little.
@@ -334,6 +341,15 @@ impl Focusable for CsvrApp {
 }
 
 impl CsvrApp {
+    /// Measures the columns again, for when the fonts change: the browser build adds the Japanese
+    /// font once text needs it, and text measured before that has the width of the missing glyph.
+    #[cfg(target_family = "wasm")]
+    pub(crate) fn remeasure_columns(&mut self, window: &Window) {
+        let (col_widths, row_num_width) = measure_columns(window, &self.rows, &self.headers);
+        self.col_widths = Rc::new(col_widths);
+        self.row_num_width = row_num_width;
+    }
+
     // HACK: GPUI has no public API for horizontal scroll offset on UniformListScrollHandle.
     // Access internal fields directly. Replace when a public API becomes available.
     fn h_scroll_offset(&self) -> gpui::Pixels {
@@ -348,19 +364,18 @@ impl CsvrApp {
         state.base_handle.set_offset(gpui::point(x, y));
     }
 
-    pub(crate) fn new(data: CsvData, cx: &mut Context<Self>) -> Self {
-        let col_widths = Rc::new(compute_column_widths(&data));
-        let row_num_width = row_number_col_width(data.rows.row_count());
+    pub(crate) fn new(data: CsvData, window: &Window, cx: &mut Context<Self>) -> Self {
         let col_count = data.headers.len();
         let numeric_columns = compute_numeric_columns(&data.rows, col_count);
         let raw_headers = data.headers.clone();
-        let headers = data
+        let headers: Vec<SharedString> = data
             .headers
             .iter()
             .map(|h| SharedString::from(h.to_uppercase()))
             .collect();
         let total_rows = data.rows.row_count();
         let rows = Arc::new(data.rows);
+        let (col_widths, row_num_width) = measure_columns(window, &rows, &headers);
         // Find first two numeric columns for chart defaults
         let first_numeric = numeric_columns.iter().position(|&b| b).unwrap_or(0);
         let second_numeric = numeric_columns
@@ -381,7 +396,7 @@ impl CsvrApp {
             headers,
             raw_headers,
             rows,
-            col_widths,
+            col_widths: Rc::new(col_widths),
             numeric_columns,
             row_num_width,
             scroll_handle: UniformListScrollHandle::new(),
@@ -1233,6 +1248,117 @@ impl EntityInputHandler for CsvrApp {
     }
 }
 
+/// The widths of the columns and of the row number column, measured with the fonts the table
+/// draws with. Cell lines go through `LineMeasure`; headers are few, so each is shaped whole.
+fn measure_columns(window: &Window, rows: &Table, headers: &[SharedString]) -> (Vec<f32>, f32) {
+    let rem_size = window.rem_size();
+    let cell_size = CELL_TEXT_SIZE.to_pixels(rem_size);
+    let header_font = gpui::font(TABLE_FONT_FAMILY).bold();
+    let header_size = HEADER_TEXT_SIZE.to_pixels(rem_size);
+    // Always counted, so sorting a column does not change its width and shift the table.
+    let indicator_width = SORT_INDICATOR_GAP.to_pixels(rem_size).as_f32()
+        + ["↑", "↓"]
+            .map(|arrow| line_width(window, &header_font, header_size, arrow))
+            .into_iter()
+            .fold(0.0, f32::max);
+    let mut cell_measure = LineMeasure::new(window, gpui::font(TABLE_FONT_FAMILY), cell_size);
+    let col_widths = compute_column_widths(
+        rows,
+        headers,
+        |line| cell_measure.width(line),
+        |line| line_width(window, &header_font, header_size, line) + indicator_width,
+    );
+    let digit_width = ('0'..='9')
+        .map(|digit| cell_measure.char_width(digit))
+        .fold(0.0, f32::max);
+    let row_num_width = row_number_col_width(rows.row_count(), digit_width);
+    (col_widths, row_num_width)
+}
+
+/// Measures cell lines without shaping most of them: a line of the characters
+/// `measurable_by_pairs` accepts is as wide as its characters plus an adjustment for each
+/// adjacent pair (kerning, and the space CoreText adds between CJK and Latin). Characters and
+/// pairs repeat across cells, so each is shaped once. Shaping each line whole takes about
+/// 10-40µs, which adds up to a second on a file with hundreds of columns.
+struct LineMeasure<'a> {
+    window: &'a Window,
+    font: Font,
+    font_size: Pixels,
+    char_widths: HashMap<char, f32>,
+    pair_adjustments: HashMap<(char, char), f32>,
+}
+
+impl<'a> LineMeasure<'a> {
+    fn new(window: &'a Window, font: Font, font_size: Pixels) -> Self {
+        Self {
+            window,
+            font,
+            font_size,
+            char_widths: HashMap::new(),
+            pair_adjustments: HashMap::new(),
+        }
+    }
+
+    fn width(&mut self, line: &str) -> f32 {
+        if !measurable_by_pairs(line) {
+            return self.shaped_width(line);
+        }
+        let mut width = 0.0;
+        let mut previous = None;
+        for c in line.chars() {
+            width += self.char_width(c);
+            if let Some(previous) = previous {
+                width += self.pair_adjustment(previous, c);
+            }
+            previous = Some(c);
+        }
+        width
+    }
+
+    fn char_width(&mut self, c: char) -> f32 {
+        if let Some(&width) = self.char_widths.get(&c) {
+            return width;
+        }
+        let width = self.shaped_width(c.encode_utf8(&mut [0; 4]));
+        self.char_widths.insert(c, width);
+        width
+    }
+
+    fn pair_adjustment(&mut self, a: char, b: char) -> f32 {
+        if let Some(&adjustment) = self.pair_adjustments.get(&(a, b)) {
+            return adjustment;
+        }
+        let pair: String = [a, b].into_iter().collect();
+        let adjustment = self.shaped_width(&pair) - self.char_width(a) - self.char_width(b);
+        self.pair_adjustments.insert((a, b), adjustment);
+        adjustment
+    }
+
+    fn shaped_width(&self, text: &str) -> f32 {
+        line_width(self.window, &self.font, self.font_size, text)
+    }
+}
+
+/// The width of one line of text. `text` must not contain a newline.
+fn line_width(window: &Window, font: &Font, font_size: Pixels, text: &str) -> f32 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let run = TextRun {
+        len: text.len(),
+        font: font.clone(),
+        color: Hsla::default(),
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    };
+    window
+        .text_system()
+        .layout_line(text, font_size, &[run], None)
+        .width
+        .as_f32()
+}
+
 impl Render for CsvrApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
@@ -1240,7 +1366,7 @@ impl Render for CsvrApp {
         // the root sets for them.
         let input_line_height = {
             let mut style = window.text_style();
-            style.font_size = rems(0.875).into();
+            style.font_size = CELL_TEXT_SIZE.into();
             style.line_height_in_pixels(window.rem_size())
         };
         let viewport_width = window.viewport_size().width.as_f32();
@@ -1390,10 +1516,10 @@ impl Render for CsvrApp {
                     cx.stop_propagation();
                 }
             }))
-            .font_family(".SystemUIFont")
+            .font_family(TABLE_FONT_FAMILY)
             .bg(rgb(BG_BASE))
             .text_color(rgb(TEXT_MAIN))
-            .text_sm()
+            .text_size(CELL_TEXT_SIZE)
             .size_full()
             .flex()
             .flex_col()
@@ -1406,7 +1532,7 @@ impl Render for CsvrApp {
                     .border_color(rgb(BORDER_COLOR))
                     .bg(rgb(HEADER_BG))
                     .text_color(rgb(TEXT_SUBTEXT))
-                    .text_xs()
+                    .text_size(HEADER_TEXT_SIZE)
                     .font_weight(gpui::FontWeight::BOLD)
                     // Inner row: pinned section + scrollable section
                     .child({

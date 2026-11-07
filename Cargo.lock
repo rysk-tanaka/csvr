@@ -944,7 +944,6 @@ dependencies = [
  "csv",
  "encoding_rs",
  "regex",
- "unicode-width",
  "zip",
 ]
 

@@ -740,7 +740,7 @@ pub struct TextInputState {
     selected: Range<usize>,
     marked: Option<Range<usize>>,
     /// Set by `replace_and_mark` even when the composing text becomes empty, and cleared by
-    /// `replace` / `unmark`. The browser keeps composing until compositionend in that case.
+    /// `replace` / `unmark` / `delete_backward`. The browser keeps composing until compositionend in that case.
     composition_open: bool,
 }
 
@@ -870,6 +870,7 @@ impl TextInputState {
         self.text.replace_range(range.clone(), "");
         self.selected = range.start..range.start;
         self.marked = None;
+        self.composition_open = false;
     }
 
     fn edit_range(&self, range_utf16: Option<Range<usize>>) -> Range<usize> {
@@ -2347,6 +2348,16 @@ mod tests {
         state.delete_backward();
         assert_eq!(state.text(), "ad");
         assert_eq!(state.selected_range_utf16(), 1..1);
+    }
+
+    #[test]
+    fn text_input_delete_backward_ends_an_empty_composition() {
+        let mut state = TextInputState::new("ab");
+        state.replace_and_mark(None, "", None);
+        assert!(state.is_composition_open());
+        state.delete_backward();
+        assert_eq!(state.text(), "a");
+        assert!(!state.is_composition_open());
     }
 
     #[test]

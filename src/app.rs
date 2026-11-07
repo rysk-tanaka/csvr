@@ -999,6 +999,17 @@ impl CsvrApp {
         })
     }
 
+    /// Passes a key on to the IME while it is composing, and says whether it did. On the web,
+    /// keys reach the app before the IME, so an action such as Escape or `cmd-f` would otherwise
+    /// cancel the composition by closing the bar under it.
+    fn defer_to_ime(&self, cx: &mut Context<Self>) -> bool {
+        let is_ime_editing = self.is_ime_editing();
+        if is_ime_editing {
+            cx.propagate();
+        }
+        is_ime_editing
+    }
+
     /// Puts the edited text into the open bar's query once the IME is done with it.
     fn commit_text_input(&mut self, cx: &mut Context<Self>) {
         if self.is_ime_editing() {
@@ -1068,8 +1079,15 @@ impl CsvrApp {
         let modifiers = &keystroke.modifiers;
         // Handled here because the browser's hidden textarea only holds the text around the
         // caret, so its select-all misses the rest of a long query.
+        // macOS uses ctrl-a for the start of the line, so the native build takes only cmd-a. The
+        // browser build also takes ctrl-a, the select-all of Windows and Linux.
+        let has_select_all_modifier = if cfg!(target_family = "wasm") {
+            modifiers.platform != modifiers.control
+        } else {
+            modifiers.platform && !modifiers.control
+        };
         let is_select_all = keystroke.key == "a"
-            && (modifiers.platform != modifiers.control)
+            && has_select_all_modifier
             && !modifiers.alt
             && !modifiers.shift
             && !modifiers.function;
@@ -1259,16 +1277,16 @@ impl Render for CsvrApp {
             .track_focus(&self.focus_handle(cx))
             .key_context("CsvrApp")
             .on_action(cx.listener(|this, _: &ToggleSearch, _window, cx| {
+                if this.defer_to_ime(cx) {
+                    return;
+                }
                 if !this.any_input_active() || this.search_active {
                     this.toggle_search();
                     cx.notify();
                 }
             }))
             .on_action(cx.listener(|this, _: &DismissSearch, _window, cx| {
-                // On the web, Escape reaches the app before the IME, which uses it to cancel
-                // the composition.
-                if this.is_ime_editing() {
-                    cx.propagate();
+                if this.defer_to_ime(cx) {
                     return;
                 }
                 if this.col_filter_active {
@@ -1289,20 +1307,35 @@ impl Render for CsvrApp {
                 }
             }))
             .on_action(cx.listener(|this, _: &ToggleChart, _window, cx| {
+                if this.defer_to_ime(cx) {
+                    return;
+                }
                 this.toggle_chart();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &ToggleMetadata, _window, cx| {
+                if this.defer_to_ime(cx) {
+                    return;
+                }
                 this.toggle_metadata();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &CopySelection, _window, cx| {
+                if this.defer_to_ime(cx) {
+                    return;
+                }
                 this.copy_selection(cx);
             }))
             .on_action(cx.listener(|this, _: &ExportJson, _window, cx| {
+                if this.defer_to_ime(cx) {
+                    return;
+                }
                 this.export_json(cx);
             }))
             .on_action(cx.listener(|this, _: &ExportMarkdown, _window, cx| {
+                if this.defer_to_ime(cx) {
+                    return;
+                }
                 this.export_markdown(cx);
             }))
             .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
@@ -1368,28 +1401,17 @@ impl Render for CsvrApp {
                 // --- Normal mode: trigger keys for input modes ---
                 if !keystroke.modifiers.platform && !keystroke.modifiers.control {
                     match keystroke.key_char.as_deref() {
-                        Some("/") => {
-                            this.toggle_search();
-                            cx.notify();
-                        }
-                        Some("*") => {
-                            this.toggle_col_filter();
-                            cx.notify();
-                        }
-                        Some("&") => {
-                            this.toggle_row_filter();
-                            cx.notify();
-                        }
-                        Some("f") => {
-                            this.toggle_pin_input();
-                            cx.notify();
-                        }
-                        Some("m") => {
-                            this.toggle_metadata();
-                            cx.notify();
-                        }
-                        _ => {}
+                        Some("/") => this.toggle_search(),
+                        Some("*") => this.toggle_col_filter(),
+                        Some("&") => this.toggle_row_filter(),
+                        Some("f") => this.toggle_pin_input(),
+                        Some("m") => this.toggle_metadata(),
+                        _ => return,
                     }
+                    cx.notify();
+                    // The input handler of a bar closed in this frame stays registered until
+                    // the next draw, and would insert the trigger key into the bar opened here.
+                    cx.stop_propagation();
                 }
             }))
             .font_family(".SystemUIFont")

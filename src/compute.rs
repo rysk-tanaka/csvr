@@ -120,11 +120,50 @@ pub(crate) fn anchored_position(old: &[usize], new: &RowPositions, top: usize) -
         .or_else(|| new.len.checked_sub(1))
 }
 
+/// The `/` query, matched as a literal anywhere in a cell regardless of case.
+enum SearchQuery {
+    /// No `/` query: every row passes.
+    None,
+    /// The escaped query, so that cells are matched without allocating a lowercased copy of each.
+    Regex(Regex),
+    /// Used only when the regex cannot be built (a query past the regex size limit), so that a
+    /// long query still narrows the rows instead of matching nothing.
+    Lowercase(String),
+}
+
+impl SearchQuery {
+    /// `size_limit` is `None` to keep the `regex` crate's default; tests pass a small one to
+    /// reach the fallback.
+    fn new(query: &str, size_limit: Option<usize>) -> Self {
+        if query.is_empty() {
+            return Self::None;
+        }
+        let mut builder = RegexBuilder::new(&regex::escape(query));
+        builder.case_insensitive(true);
+        if let Some(limit) = size_limit {
+            builder.size_limit(limit);
+        }
+        match builder.build() {
+            Ok(re) => Self::Regex(re),
+            Err(_) => Self::Lowercase(query.to_lowercase()),
+        }
+    }
+
+    fn matches(&self, row: Row<'_>) -> bool {
+        match self {
+            Self::None => true,
+            Self::Regex(re) => row.iter().any(|cell| re.is_match(cell)),
+            Self::Lowercase(query) => row
+                .iter()
+                .any(|cell| cell.to_lowercase().contains(query.as_str())),
+        }
+    }
+}
+
 /// The `/` search and the `&` regex filter, prepared once per query so that the rows can be
 /// checked in chunks off the UI thread.
 pub(crate) struct RowFilter {
-    /// Lowercased `/` query; `None` when the query is empty.
-    query_lower: Option<String>,
+    query: SearchQuery,
     /// Compiled `&` pattern and its target column; `None` when the pattern is empty or invalid.
     regex: Option<(Regex, Option<usize>)>,
 }
@@ -133,13 +172,16 @@ impl RowFilter {
     /// An invalid `pattern` is ignored so that the `/` search still narrows the rows; check it
     /// with `is_valid_pattern` to show the error.
     pub(crate) fn new(query: &str, pattern: &str, target_col: Option<usize>) -> Self {
-        let query_lower = (!query.is_empty()).then(|| query.to_lowercase());
+        Self::with_search(SearchQuery::new(query, None), pattern, target_col)
+    }
+
+    fn with_search(query: SearchQuery, pattern: &str, target_col: Option<usize>) -> Self {
         let regex = if pattern.is_empty() {
             None
         } else {
             Self::build_regex(pattern).ok().map(|re| (re, target_col))
         };
-        Self { query_lower, regex }
+        Self { query, regex }
     }
 
     /// Whether the `&` filter accepts `pattern`. An empty pattern is valid and filters nothing.
@@ -154,11 +196,7 @@ impl RowFilter {
 
     /// The two conditions are checked separately, so they may hold in different cells.
     pub(crate) fn matches(&self, row: Row<'_>) -> bool {
-        let matches_query = self.query_lower.as_ref().is_none_or(|query| {
-            row.iter()
-                .any(|cell| cell.to_lowercase().contains(query.as_str()))
-        });
-        if !matches_query {
+        if !self.query.matches(row) {
             return false;
         }
         match &self.regex {
@@ -927,6 +965,31 @@ mod tests {
     fn filter_empty_rows() {
         let rows = make_rows(&[]);
         assert!(search(&rows, "test").is_empty());
+    }
+
+    #[test]
+    fn filter_query_is_literal() {
+        let rows = make_rows(&[&["axb"], &["a.b"], &["a+b"]]);
+        assert_eq!(search(&rows, "a.b"), vec![1]);
+        assert_eq!(search(&rows, "a+b"), vec![2]);
+    }
+
+    #[test]
+    fn filter_query_folds_final_sigma() {
+        // `to_lowercase` turns a word-final Σ into ς, which σ would not find.
+        let rows = make_rows(&[&["ΟΔΟΣ"], &["ΑΒΓ"]]);
+        assert_eq!(search(&rows, "σ"), vec![0]);
+    }
+
+    #[test]
+    fn filter_query_falls_back_when_regex_is_too_large() {
+        let query = SearchQuery::new("alice", Some(1));
+        assert!(matches!(query, SearchQuery::Lowercase(_)));
+        let rows = make_rows(&[&["ALICE", "Tokyo"], &["Alice", "Osaka"], &["Bob", "Tokyo"]]);
+        let filter = RowFilter::with_search(query, "tokyo", None);
+        let mut out = Vec::new();
+        filter.filter_range(&rows, 0..rows.row_count(), &mut out);
+        assert_eq!(out, vec![0]);
     }
 
     // --- RowFilter: `/` and `&` together, and chunking ---

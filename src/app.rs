@@ -3,18 +3,21 @@ use std::{ops::Range, rc::Rc, sync::Arc, time::Duration};
 use futures_lite::future::yield_now;
 
 use gpui::{
-    App, ClipboardItem, Context, Entity, FocusHandle, Focusable, KeyBinding, KeyDownEvent,
-    ListHorizontalSizingBehavior, Render, SharedString, Task, UniformListScrollHandle, Window,
-    actions, canvas, div, prelude::*, px, rgb, uniform_list,
+    App, Bounds, ClipboardItem, ContentMask, Context, ElementInputHandler, Entity,
+    EntityInputHandler, FocusHandle, Focusable, KeyBinding, KeyDownEvent, Keystroke,
+    ListHorizontalSizingBehavior, Pixels, Render, SharedString, Task, TextAlign, TextRun,
+    UTF16Selection, UnderlineStyle, UniformListScrollHandle, Window, actions, canvas, div, fill,
+    point, prelude::*, px, rems, rgb, uniform_list,
 };
 use regex::RegexBuilder;
 
 use csvr_core::compute::{
-    ColumnStats, RowFilter, RowPositions, anchored_position, chart_legend, clamp_h_offset,
-    compute_column_stats, compute_column_widths, compute_histogram_bins, compute_numeric_columns,
-    copied_status_message, downsample, export_json, export_markdown, extract_column_values,
-    extract_scatter_pairs, filter_columns_by_regex, h_offset_to_reveal, histogram_axes, pairs_axes,
-    parse_column_filter, points_axes, reorder_indices, row_number_col_width, sort_indices,
+    ColumnStats, RowFilter, RowPositions, TextInputState, anchored_position, caret_scroll_offset,
+    chart_legend, clamp_h_offset, compute_column_stats, compute_column_widths,
+    compute_histogram_bins, compute_numeric_columns, copied_status_message, downsample,
+    export_json, export_markdown, extract_column_values, extract_scatter_pairs,
+    filter_columns_by_regex, h_offset_to_reveal, histogram_axes, pairs_axes, parse_column_filter,
+    points_axes, reorder_indices, row_number_col_width, sort_indices,
 };
 use csvr_core::data::{
     CHART_TYPES, ChartAxes, ChartData, ChartType, CsvData, SortDirection, Table,
@@ -47,7 +50,11 @@ pub(crate) enum ShortcutModifier {
 
 /// Bindings without a modifier come once, however many modifiers are given.
 pub(crate) fn key_bindings(modifiers: &[ShortcutModifier]) -> Vec<KeyBinding> {
-    let context = Some("CsvrApp");
+    // None of the bindings apply while the IME is composing. On the web, keys reach the app
+    // before the IME, so Escape or `cmd-f` would otherwise close the bar under the composition.
+    // The view sets `ime_editing` in its key context (see `render`), and GPUI redraws a changed
+    // view before it dispatches the next key, so the context is current.
+    let context = Some("CsvrApp && !ime_editing");
     let mut bindings = vec![KeyBinding::new("escape", DismissSearch, context)];
     for modifier in modifiers {
         // `KeyBinding::new` takes `&'static str`, so the keystrokes are spelled out per modifier.
@@ -88,6 +95,8 @@ const STATUS_MESSAGE_DURATION: Duration = Duration::from_secs(3);
 /// Separates clipped columns from the row numbers, where a cut-off value can read as part of the
 /// number. Counted in the content width so the last column still reaches the right edge.
 const PINNED_BORDER_WIDTH: f32 = 1.0;
+/// Width of the caret in the `/`, `*` and `&` bars.
+const CARET_WIDTH: f32 = 1.0;
 /// Rows a filter task checks between yields. Small enough that a replaced task stops soon and a
 /// single-threaded browser build (gpui_web, `src/web.rs`), which runs background tasks on the UI
 /// thread, still handles input; large enough that yielding costs little.
@@ -313,6 +322,9 @@ pub(crate) struct CsvrApp {
     row_filter_pattern: String,
     col_filter_error: bool,
     row_filter_error: bool,
+    /// What the open `/`, `*` or `&` bar is editing, including the IME's composing text. The
+    /// queries above keep the last committed text, so the filters never see composing text.
+    text_input: Option<TextInputState>,
 }
 
 impl Focusable for CsvrApp {
@@ -403,6 +415,7 @@ impl CsvrApp {
             row_filter_pattern: String::new(),
             col_filter_error: false,
             row_filter_error: false,
+            text_input: None,
         }
     }
 
@@ -566,10 +579,14 @@ impl CsvrApp {
 
     fn toggle_search(&mut self) {
         self.search_active = !self.search_active;
+        self.text_input = self
+            .search_active
+            .then(|| TextInputState::new(self.search_query.clone()));
     }
 
     fn close_search(&mut self) {
         self.search_active = false;
+        self.text_input = None;
         // Keep current filter (consistent with `*` and `&` Escape behavior).
         // User can clear by reopening `/` and deleting the query.
     }
@@ -854,6 +871,9 @@ impl CsvrApp {
 
     fn toggle_col_filter(&mut self) {
         self.col_filter_active = !self.col_filter_active;
+        self.text_input = self
+            .col_filter_active
+            .then(|| TextInputState::new(self.col_filter_query.clone()));
         if self.col_filter_active {
             // Revalidate error flag without clearing selection or scanning headers.
             // Only check if the pattern compiles.
@@ -875,6 +895,7 @@ impl CsvrApp {
 
     fn close_col_filter(&mut self) {
         self.col_filter_active = false;
+        self.text_input = None;
         self.col_filter_error = false;
         // Keep current filter (consistent Escape behavior across all modes).
         // User can clear by reopening `*` and deleting the pattern.
@@ -931,6 +952,9 @@ impl CsvrApp {
 
     fn toggle_row_filter(&mut self) {
         self.row_filter_active = !self.row_filter_active;
+        self.text_input = self
+            .row_filter_active
+            .then(|| TextInputState::new(self.row_filter_query.clone()));
         if self.row_filter_active {
             // Revalidate error flag without clearing selection or re-scanning rows.
             // Only check if the pattern compiles — no need to run it against all rows.
@@ -952,6 +976,7 @@ impl CsvrApp {
 
     fn close_row_filter(&mut self) {
         self.row_filter_active = false;
+        self.text_input = None;
         self.row_filter_error = false;
         // Keep current filter (consistent Escape behavior across all modes).
         // User can clear by reopening `&` and deleting the query.
@@ -964,11 +989,260 @@ impl CsvrApp {
             || self.pin_input_active
             || self.row_filter_active
     }
+
+    // --- Text input for the `/`, `*` and `&` bars ---
+
+    /// Whether the IME is in the middle of an edit, so keys belong to it and the query waits.
+    fn is_ime_editing(&self) -> bool {
+        self.text_input.as_ref().is_some_and(|input| {
+            // The browser keeps composing after the composing text becomes empty, until
+            // compositionend, and keys still reach the app first in the meantime. macOS can end
+            // a composition with an empty marked text and no unmark, so the flag would stay set
+            // there; it routes keys to the IME first anyway while text is marked.
+            input.is_composing() || (cfg!(target_family = "wasm") && input.is_composition_open())
+        })
+    }
+
+    /// Puts the edited text into the open bar's query once the IME is done with it.
+    fn commit_text_input(&mut self, cx: &mut Context<Self>) {
+        if self.is_ime_editing() {
+            return;
+        }
+        let Some(text) = self
+            .text_input
+            .as_ref()
+            .map(|input| input.text().to_string())
+        else {
+            return;
+        };
+        // Same order as the exclusive modes. Unchanged queries are skipped so that edits that
+        // only move the composition do not refilter.
+        if self.col_filter_active {
+            if text != self.col_filter_query {
+                self.set_col_filter_query(text);
+            }
+        } else if self.row_filter_active {
+            if text != self.row_filter_query {
+                self.set_row_filter_query(text, cx);
+            }
+        } else if self.search_active && text != self.search_query {
+            self.set_search_query(text, cx);
+        }
+    }
+
+    fn after_text_input_edit(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.commit_text_input(cx);
+        window.notify_text_input_changed(&self.focus_handle);
+        cx.notify();
+    }
+
+    fn close_text_input_bar(&mut self) {
+        if self.col_filter_active {
+            self.close_col_filter();
+        } else if self.row_filter_active {
+            self.close_row_filter();
+        } else if self.search_active {
+            self.close_search();
+        }
+    }
+
+    /// Keys for the `/`, `*` and `&` bars. Typed text is left alone: GPUI hands it to the input
+    /// handler afterwards, so adding it here too would insert it twice. Handled keys stop
+    /// propagation, or the browser would also apply them to its hidden textarea.
+    fn handle_text_input_key(
+        &mut self,
+        keystroke: &Keystroke,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // On the web, keys reach the app before the IME while composing.
+        if self.is_ime_editing() {
+            return;
+        }
+        // The bars do not move the caret with these keys, and macOS GPUI would not either.
+        // Stopping them keeps the browser from moving the caret of its hidden textarea.
+        let is_navigation_key = matches!(
+            keystroke.key.as_str(),
+            "up" | "down" | "left" | "right" | "home" | "end" | "pageup" | "pagedown"
+        );
+        if is_navigation_key {
+            cx.stop_propagation();
+            return;
+        }
+        let modifiers = &keystroke.modifiers;
+        // Handled here because the browser's hidden textarea only holds the text around the
+        // caret, so its select-all misses the rest of a long query.
+        // macOS uses ctrl-a for the start of the line, so the native build takes only cmd-a. The
+        // browser build also takes ctrl-a, the select-all of Windows and Linux.
+        let has_select_all_modifier = if cfg!(target_family = "wasm") {
+            modifiers.platform != modifiers.control
+        } else {
+            modifiers.platform && !modifiers.control
+        };
+        let is_select_all = keystroke.key == "a"
+            && has_select_all_modifier
+            && !modifiers.alt
+            && !modifiers.shift
+            && !modifiers.function;
+        if is_select_all {
+            if let Some(input) = &mut self.text_input {
+                input.select_all();
+            }
+            window.notify_text_selection_changed(&self.focus_handle);
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        }
+        if modifiers.platform || modifiers.control {
+            return;
+        }
+        match keystroke.key.as_str() {
+            "enter" => {
+                self.close_text_input_bar();
+                cx.notify();
+                cx.stop_propagation();
+            }
+            "backspace" => {
+                if let Some(input) = &mut self.text_input {
+                    input.delete_backward();
+                }
+                self.after_text_input_edit(window, cx);
+                cx.stop_propagation();
+            }
+            _ => {}
+        }
+    }
+}
+
+impl EntityInputHandler for CsvrApp {
+    fn text_for_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        actual_range: &mut Option<Range<usize>>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<String> {
+        let (text, range) = self.text_input.as_ref()?.text_for_range_utf16(range_utf16);
+        actual_range.replace(range);
+        Some(text)
+    }
+
+    fn selected_text_range(
+        &mut self,
+        _ignore_disabled_input: bool,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<UTF16Selection> {
+        Some(UTF16Selection {
+            range: self.text_input.as_ref()?.selected_range_utf16(),
+            reversed: false,
+        })
+    }
+
+    fn marked_text_range(
+        &self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Range<usize>> {
+        self.text_input.as_ref()?.marked_range_utf16()
+    }
+
+    fn text_length_utf16(
+        &mut self,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        Some(self.text_input.as_ref()?.len_utf16())
+    }
+
+    fn unmark_text(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(input) = &mut self.text_input else {
+            return;
+        };
+        input.unmark();
+        self.after_text_input_edit(window, cx);
+    }
+
+    fn replace_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        text: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = &mut self.text_input else {
+            return;
+        };
+        input.replace(range_utf16, text);
+        self.after_text_input_edit(window, cx);
+    }
+
+    fn replace_and_mark_text_in_range(
+        &mut self,
+        range_utf16: Option<Range<usize>>,
+        new_text: &str,
+        new_selected_range_utf16: Option<Range<usize>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = &mut self.text_input else {
+            return;
+        };
+        input.replace_and_mark(range_utf16, new_text, new_selected_range_utf16);
+        self.after_text_input_edit(window, cx);
+    }
+
+    // Accepted whenever it comes: the browser's hidden textarea has already moved its
+    // selection, and the next edit is placed from both, so refusing would put it elsewhere.
+    fn set_selected_text_range(
+        &mut self,
+        range_utf16: Range<usize>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(input) = &mut self.text_input else {
+            return;
+        };
+        input.set_selected_range_utf16(range_utf16);
+        window.notify_text_selection_changed(&self.focus_handle);
+        cx.notify();
+    }
+
+    /// The whole bar: macOS opens the IME candidates below it.
+    fn bounds_for_range(
+        &mut self,
+        _range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
+        self.text_input.as_ref().map(|_| element_bounds)
+    }
+
+    fn character_index_for_point(
+        &mut self,
+        _point: gpui::Point<Pixels>,
+        _window: &mut Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<usize> {
+        None
+    }
+
+    fn accepts_text_input(&self, _window: &mut Window, _cx: &mut Context<Self>) -> bool {
+        self.text_input.is_some()
+    }
 }
 
 impl Render for CsvrApp {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
+        // The bars draw their text themselves, so their height is one `text_sm` line, the size
+        // the root sets for them.
+        let input_line_height = {
+            let mut style = window.text_style();
+            style.font_size = rems(0.875).into();
+            style.line_height_in_pixels(window.rem_size())
+        };
         let viewport_width = window.viewport_size().width.as_f32();
         let content_width = self.row_num_width
             + PINNED_BORDER_WIDTH
@@ -994,7 +1268,11 @@ impl Render for CsvrApp {
 
         div()
             .track_focus(&self.focus_handle(cx))
-            .key_context("CsvrApp")
+            .key_context(if self.is_ime_editing() {
+                "CsvrApp ime_editing"
+            } else {
+                "CsvrApp"
+            })
             .on_action(cx.listener(|this, _: &ToggleSearch, _window, cx| {
                 if !this.any_input_active() || this.search_active {
                     this.toggle_search();
@@ -1070,25 +1348,9 @@ impl Render for CsvrApp {
                     }
                 }
 
-                // --- E3: `*` column filter input mode ---
-                if this.col_filter_active {
-                    if keystroke.modifiers.platform || keystroke.modifiers.control {
-                        return;
-                    }
-                    if keystroke.key == "enter" {
-                        this.close_col_filter();
-                        cx.notify();
-                    } else if keystroke.key == "backspace" {
-                        let mut q = this.col_filter_query.clone();
-                        q.pop();
-                        this.set_col_filter_query(q);
-                        cx.notify();
-                    } else if let Some(ch) = &keystroke.key_char {
-                        let mut q = this.col_filter_query.clone();
-                        q.push_str(ch);
-                        this.set_col_filter_query(q);
-                        cx.notify();
-                    }
+                // --- `*` column filter, `&` row filter and `/` search input modes ---
+                if this.col_filter_active || this.row_filter_active || this.search_active {
+                    this.handle_text_input_key(keystroke, window, cx);
                     return;
                 }
 
@@ -1112,75 +1374,20 @@ impl Render for CsvrApp {
                     return;
                 }
 
-                // --- E4: `&` row filter input mode ---
-                if this.row_filter_active {
-                    if keystroke.modifiers.platform || keystroke.modifiers.control {
-                        return;
-                    }
-                    if keystroke.key == "enter" {
-                        this.close_row_filter();
-                        cx.notify();
-                    } else if keystroke.key == "backspace" {
-                        let mut q = this.row_filter_query.clone();
-                        q.pop();
-                        this.set_row_filter_query(q, cx);
-                        cx.notify();
-                    } else if let Some(ch) = &keystroke.key_char {
-                        let mut q = this.row_filter_query.clone();
-                        q.push_str(ch);
-                        this.set_row_filter_query(q, cx);
-                        cx.notify();
-                    }
-                    return;
-                }
-
-                // --- Existing: `/` search input mode ---
-                if this.search_active {
-                    if keystroke.modifiers.platform || keystroke.modifiers.control {
-                        return;
-                    }
-                    if keystroke.key == "enter" {
-                        this.close_search();
-                        cx.notify();
-                    } else if keystroke.key == "backspace" {
-                        let mut q = this.search_query.clone();
-                        q.pop();
-                        this.set_search_query(q, cx);
-                        cx.notify();
-                    } else if let Some(ch) = &keystroke.key_char {
-                        let mut q = this.search_query.clone();
-                        q.push_str(ch);
-                        this.set_search_query(q, cx);
-                        cx.notify();
-                    }
-                    return;
-                }
-
                 // --- Normal mode: trigger keys for input modes ---
                 if !keystroke.modifiers.platform && !keystroke.modifiers.control {
                     match keystroke.key_char.as_deref() {
-                        Some("/") => {
-                            this.toggle_search();
-                            cx.notify();
-                        }
-                        Some("*") => {
-                            this.toggle_col_filter();
-                            cx.notify();
-                        }
-                        Some("&") => {
-                            this.toggle_row_filter();
-                            cx.notify();
-                        }
-                        Some("f") => {
-                            this.toggle_pin_input();
-                            cx.notify();
-                        }
-                        Some("m") => {
-                            this.toggle_metadata();
-                            cx.notify();
-                        }
-                        _ => {}
+                        Some("/") => this.toggle_search(),
+                        Some("*") => this.toggle_col_filter(),
+                        Some("&") => this.toggle_row_filter(),
+                        Some("f") => this.toggle_pin_input(),
+                        Some("m") => this.toggle_metadata(),
+                        _ => return,
                     }
+                    cx.notify();
+                    // The input handler of a bar closed in this frame stays registered until
+                    // the next draw, and would insert the trigger key into the bar opened here.
+                    cx.stop_propagation();
                 }
             }))
             .font_family(".SystemUIFont")
@@ -1332,18 +1539,18 @@ impl Render for CsvrApp {
             })
             // `*` column filter bar
             .when(self.col_filter_active, |el| {
-                let query_display: SharedString = if self.col_filter_query.is_empty() {
-                    "Type column regex...".into()
-                } else {
-                    self.col_filter_query.clone().into()
-                };
-                let query_color = if self.col_filter_error {
-                    TEXT_ERROR
-                } else if self.col_filter_query.is_empty() {
-                    TEXT_SUBTEXT
-                } else {
-                    TEXT_MAIN
-                };
+                let input = text_input_line(
+                    self.text_input.as_ref(),
+                    "Type column regex...",
+                    if self.col_filter_error {
+                        TEXT_ERROR
+                    } else {
+                        TEXT_MAIN
+                    },
+                    self.focus_handle.clone(),
+                    entity.clone(),
+                    input_line_height,
+                );
                 let vis_count = self.visible_col_indices.len();
                 let total_cols = self.raw_headers.len();
                 el.child(
@@ -1359,12 +1566,7 @@ impl Render for CsvrApp {
                         .items_center()
                         .gap_2()
                         .child(div().text_color(rgb(TEXT_SUBTEXT)).text_xs().child("*"))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_color(rgb(query_color))
-                                .child(query_display),
-                        )
+                        .child(input)
                         .child(
                             div()
                                 .text_color(rgb(if self.col_filter_error {
@@ -1411,18 +1613,18 @@ impl Render for CsvrApp {
             })
             // `&` row filter bar
             .when(self.row_filter_active, |el| {
-                let query_display: SharedString = if self.row_filter_query.is_empty() {
-                    "Type row filter regex (or col:regex)...".into()
-                } else {
-                    self.row_filter_query.clone().into()
-                };
-                let query_color = if self.row_filter_error {
-                    TEXT_ERROR
-                } else if self.row_filter_query.is_empty() {
-                    TEXT_SUBTEXT
-                } else {
-                    TEXT_MAIN
-                };
+                let input = text_input_line(
+                    self.text_input.as_ref(),
+                    "Type row filter regex (or col:regex)...",
+                    if self.row_filter_error {
+                        TEXT_ERROR
+                    } else {
+                        TEXT_MAIN
+                    },
+                    self.focus_handle.clone(),
+                    entity.clone(),
+                    input_line_height,
+                );
                 el.child(
                     div()
                         .w_full()
@@ -1436,12 +1638,7 @@ impl Render for CsvrApp {
                         .items_center()
                         .gap_2()
                         .child(div().text_color(rgb(TEXT_SUBTEXT)).text_xs().child("&"))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_color(rgb(query_color))
-                                .child(query_display),
-                        )
+                        .child(input)
                         .child(
                             div()
                                 .text_color(rgb(if self.row_filter_error {
@@ -1460,16 +1657,14 @@ impl Render for CsvrApp {
             })
             // Search bar
             .when(self.search_active, |el| {
-                let query_display: SharedString = if self.search_query.is_empty() {
-                    "Type to search...".into()
-                } else {
-                    self.search_query.clone().into()
-                };
-                let query_color = if self.search_query.is_empty() {
-                    TEXT_SUBTEXT
-                } else {
-                    TEXT_MAIN
-                };
+                let input = text_input_line(
+                    self.text_input.as_ref(),
+                    "Type to search...",
+                    TEXT_MAIN,
+                    self.focus_handle.clone(),
+                    entity.clone(),
+                    input_line_height,
+                );
                 el.child(
                     div()
                         .w_full()
@@ -1483,12 +1678,7 @@ impl Render for CsvrApp {
                         .items_center()
                         .gap_2()
                         .child(div().text_color(rgb(TEXT_SUBTEXT)).text_xs().child("/"))
-                        .child(
-                            div()
-                                .flex_1()
-                                .text_color(rgb(query_color))
-                                .child(query_display),
-                        )
+                        .child(input)
                         .child(
                             div()
                                 .text_color(rgb(TEXT_SUBTEXT))
@@ -1814,4 +2004,108 @@ fn format_stat(value: f64) -> String {
     } else {
         format!("{:.4}", value)
     }
+}
+
+/// One line of the `/`, `*` or `&` bar, drawn from the text it is editing: the composing text is
+/// underlined, the selection shaded, and the caret drawn where it is. It also registers the
+/// input handler, which GPUI needs every frame to pass typed and composed text to the app.
+fn text_input_line(
+    input: Option<&TextInputState>,
+    placeholder: &'static str,
+    color: u32,
+    focus_handle: FocusHandle,
+    entity: Entity<CsvrApp>,
+    line_height: Pixels,
+) -> impl IntoElement {
+    let text = input.map_or(String::new(), |input| input.text().to_string());
+    let marked = input.and_then(TextInputState::marked_range);
+    let selected = input.map_or(0..0, TextInputState::selected_range);
+    canvas(
+        |_, _, _| {},
+        move |bounds, (), window, cx| {
+            window.handle_input(&focus_handle, ElementInputHandler::new(bounds, entity), cx);
+
+            let style = window.text_style();
+            let font_size = style.font_size.to_pixels(window.rem_size());
+            let run = |len: usize, color: u32, underline: bool| TextRun {
+                len,
+                font: style.font(),
+                color: rgb(color).into(),
+                background_color: None,
+                underline: underline.then(|| UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(rgb(color).into()),
+                    wavy: false,
+                }),
+                strikethrough: None,
+            };
+            let (shown, runs) = if text.is_empty() {
+                (
+                    placeholder.to_string(),
+                    vec![run(placeholder.len(), TEXT_SUBTEXT, false)],
+                )
+            } else {
+                // Runs split only at the composing text, so they never overlap; the selection is
+                // shaded separately below.
+                let runs = match &marked {
+                    Some(marked) => [
+                        (marked.start, false),
+                        (marked.len(), true),
+                        (text.len() - marked.end, false),
+                    ]
+                    .into_iter()
+                    .filter(|&(len, _)| len > 0)
+                    .map(|(len, underline)| run(len, color, underline))
+                    .collect(),
+                    None => vec![run(text.len(), color, false)],
+                };
+                (text.clone(), runs)
+            };
+            let line =
+                window
+                    .text_system()
+                    .shape_line(SharedString::from(shown), font_size, &runs, None);
+
+            let x_for = |index: usize| {
+                if text.is_empty() {
+                    px(0.0)
+                } else {
+                    line.x_for_index(index)
+                }
+            };
+            let caret_x = x_for(selected.end);
+            let offset = px(caret_scroll_offset(
+                caret_x.as_f32(),
+                CARET_WIDTH,
+                bounds.size.width.as_f32(),
+            ));
+            let left = bounds.left() - offset;
+            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                if !selected.is_empty() {
+                    window.paint_quad(fill(
+                        Bounds::from_corners(
+                            point(left + x_for(selected.start), bounds.top()),
+                            point(left + x_for(selected.end), bounds.bottom()),
+                        ),
+                        rgb(SURFACE1),
+                    ));
+                }
+                let origin = point(left, bounds.top());
+                if let Err(e) = line.paint(origin, line_height, TextAlign::Left, None, window, cx) {
+                    eprintln!("Warning: failed to paint input text: {e:?}");
+                }
+                if selected.is_empty() {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(left + caret_x, bounds.top()),
+                            gpui::size(px(CARET_WIDTH), bounds.size.height),
+                        ),
+                        rgb(color),
+                    ));
+                }
+            });
+        },
+    )
+    .flex_1()
+    .h(line_height)
 }

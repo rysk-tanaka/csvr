@@ -27,6 +27,8 @@ paths:
 - `toggle_col_filter()` / `set_col_filter_query()` / `close_col_filter()` — `*` コマンドによる列フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_visible_columns()` は呼ばない）
 - `toggle_pin_input()` / `confirm_pin_input()` / `cancel_pin_input()` — `f` コマンドによる列固定。空入力で Enter → `pinned_col_count = 0`（リセット）
 - `toggle_row_filter()` / `set_row_filter_query()` / `close_row_filter()` — `&` コマンドによる行の正規表現フィルタ。`toggle` はエラーフラグのみ再検証（選択を保持するため `recompute_filtered_indices()` は呼ばない）。`col:pattern` 構文で列指定可能。入力時は `needs_refilter` を立てて `recompute_filtered_indices` に依頼し、`apply_filter_result` が表示位置を維持する。エラーフラグは結果を待たずに入力の時点で判定する（バーを閉じた後に結果が来ても立ち直らない）。正規表現の設定は `RowFilter::build_regex` の 1 か所で、検証（`RowFilter::is_valid_pattern`）とフィルタで食い違わない
+- `text_input`（`TextInputState`）/ `commit_text_input()` — `/` `*` `&` のバーで編集中の文字。IME の変換中の文字（marked range）も含み、バーを開くときに今のクエリから作り、閉じると消す。各クエリ（`search_query` など）は最後に確定した文字列のままにし、IME が編集していない（`is_ime_editing()` が false）ときだけ `commit_text_input` で setter に入れ直す。変換中のローマ字の途中や再変換の途中でフィルタが走らないようにするため。`is_ime_editing` は web では `is_composition_open` も見る（gpui_web は空の `compositionupdate` のあとも `compositionend` まで変換を続け、その間もキーが届くため）。macOS では見ない（空の `setMarkedText` だけで変換を終えることがあり、印が残るため）
+- `CsvrApp` の `EntityInputHandler` — `text_input` を GPUI の入力の受け口として渡す。`text_input_line` が paint の中で `handle_input` で登録する。選択の変更（`set_selected_text_range`）はいつでも受ける。gpui_web は textarea の選択を取り込んだ前提で次の編集の範囲を決めるので、受けないと食い違って編集の位置がずれるため。そのためカーソルと選択範囲を表示する
 
 ## ステータスバー
 
@@ -85,6 +87,8 @@ paths:
 
 - **csvlens 互換のインタラクション** — `/`（検索）、`*`（列フィルタ）、`f`（列固定）、`&`（行フィルタ）のプレフィックスコマンド方式。全コマンドで統一された挙動: Enter でバーを閉じてフィルタ維持、Escape でバーを閉じてフィルタ維持（フィルタ解除は再度開いてクエリを削除）
 - **入力モードは排他的** — `any_input_active()` で判定。優先順位: `*` > `f` > `&` > `/`。あるモード中は他のトリガーキーや矢印キーを無効化
+- **`/` `*` `&` の文字は入力の受け口で受ける** — IME の変換中の文字と確定した文字を受けるため。`handle_text_input_key` は文字を足さず（足すと 2 回入る）、Enter・Backspace・全選択（`cmd-a`。ブラウザ版は `ctrl-a` も。macOS の `ctrl-a` は行頭への移動なので、ネイティブ版では受けない）と矢印キーなどだけを処理して伝播を止める。全選択をアプリで処理するのは、gpui_web の textarea には選択の前後 512 UTF-16 単位しか写さず、ブラウザの全選択では長いクエリの全体が選ばれないため。矢印キーではカーソルを動かさない（macOS の GPUI は動かさないので、版で挙動を揃える）。IME の変換中はキーを処理せず、キーの割り当て（Escape の `DismissSearch`、`cmd-f` など）もすべて外す（変換中にバーが閉じると、変換中の文字の行き場がなくなるため）。外すのは `key_bindings` のコンテキスト `CsvrApp && !ime_editing` の 1 か所で、`render` が変換中だけキーコンテキストに `ime_editing` を足す。GPUI は次のキーを処理する前に変わったビューを描き直すので、コンテキストは最新になる。アクションを足すときに、変換中のチェックを書き忘れないようにするため。通常モードで入力欄を開くトリガーキーは伝播を止める。直前に閉じた入力欄の受け口は次の描画まで残っていて、止めないとトリガーキーの文字が開いた入力欄に入るため
+- **バーの文字は `canvas` で 1 行に組んで描く** — カーソルと選択範囲を文字の位置に合わせて描き、長い入力でもカーソルが見えるように横にずらす（`caret_scroll_offset`）。`TextRun` は変換中の文字の前後でだけ分け（下線）、選択範囲は別に塗るので、両者が重なっても run が重ならない。改行は `TextInputState` が空白に置き換える（`shape_line` は改行を受けない）
 - **`selected_cell` の col は元のカラムインデックスを保持** — 列非表示でも参照が壊れない。`move_selection` は `visible_col_indices` 内で前後に移動
 - **列固定は固定列 div と非固定列 div の分離方式** — GPUI には CSS `position: sticky` がないため、行を「固定部分（行番号 + ピン留め列）」と「スクロール部分（残りの列）」の2つの div に分割。スクロール部分の外側の div を `overflow_hidden` で固定部分の右側にクリップし、内側の div の `ml(h_offset)` で列を動かす。クリップによって表示もヒットボックスも固定部分と重ならない。固定部分の右の境界線（`PINNED_BORDER_WIDTH`、列幅の合計に含める）で、切れた列の値が行番号とつながって見えるのを防ぐ。線を途切れさせないため、上下の余白は行ではなく固定部分とスクロール部分に付ける。`TableRow` は `uniform_list` が行全体をずらすので、固定部分に `ml(-h_offset)` を適用して打ち消す。ヘッダーは `uniform_list` の外にあり、`uniform_list` は prepaint までオフセットを範囲内に戻さないため、`clamp_h_offset` で同じ範囲に収めた値を使う
 - **`&` フィルタは `col:pattern` 構文で列指定** — `parse_column_filter` がヘッダー名とコロンを解析。マッチしない場合は全文を全列対象パターンとして扱う

@@ -72,7 +72,11 @@ impl Focusable for CsvrApp {
 - `AppContext` トレイトは `gpui::prelude::*` に含まれない。`cx.new()` を使うには明示的に `use gpui::AppContext` が必要（`App` 型とは別のトレイト）
 - `Focusable` トレイトは `gpui::prelude::*` に含まれない。明示的に `use gpui::Focusable` が必要
 - `KeyBinding` のコンテキストは `None` にするとグローバル。将来のモーダル追加時に競合するため `Some("CsvrApp")` を推奨。ただし、終了のようにフォーカスに関係なく効かせる操作は `None` にする
-- `on_key_down` はアクションにマッチしなかったキーストロークを処理する。テキスト入力は `keystroke.key_char` から取得
+- `on_key_down` はアクションにマッチしなかったキーストロークを処理する。`keystroke.key_char` で文字も取れるが、IME の変換中の文字や確定した文字は届かない
+- テキスト入力は入力の受け口で受ける。`EntityInputHandler` を実装し、paint の中で `window.handle_input(&focus_handle, ElementInputHandler::new(bounds, entity), cx)` を毎フレーム呼ぶ（手本は Zed の `crates/gpui/examples/input.rs`）
+  - 受け口を登録したら、`on_key_down` で文字を足さない。伝播を止めなかったキーの文字は GPUI が受け口に渡すので、2 回入る
+  - `on_key_down` で処理したキー（Enter・Backspace など）は `cx.stop_propagation()` で止める。止めないと、web では gpui_web の見えない textarea にも改行や削除が入り、受け口にもう一度届く
+  - web（gpui_web）は IME の変換中も先に `KeyDown` を配る。変換中は `on_key_down` でキーを処理せず、キーの割り当ても効かせない。割り当ては、変換中だけキーコンテキストに識別子を足し、`KeyBinding` のコンテキストを `CsvrApp && !ime_editing` のように否定で書けば 1 か所で外せる（GPUI はキーを処理する前に、変わったビューを描き直すので、コンテキストは最新になる）
 - macOS の `QuitMode` の既定値は `Explicit`。最後のウィンドウを閉じても終了しないため `LastWindowClosed` を指定する
 
 ## バージョン更新時の注意点

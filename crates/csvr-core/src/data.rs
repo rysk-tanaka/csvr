@@ -1,12 +1,12 @@
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ChartType {
+pub enum ChartType {
     Bar,
     Line,
     Scatter,
     Histogram,
 }
 
-pub(crate) const CHART_TYPES: [ChartType; 4] = [
+pub const CHART_TYPES: [ChartType; 4] = [
     ChartType::Bar,
     ChartType::Line,
     ChartType::Scatter,
@@ -14,7 +14,7 @@ pub(crate) const CHART_TYPES: [ChartType; 4] = [
 ];
 
 impl ChartType {
-    pub(crate) fn label(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
             ChartType::Bar => "Bar",
             ChartType::Line => "Line",
@@ -25,7 +25,7 @@ impl ChartType {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum SortDirection {
+pub enum SortDirection {
     Ascending,
     Descending,
 }
@@ -35,7 +35,7 @@ pub(crate) enum SortDirection {
 /// Rows are stored one after another rather than column by column, so a few rows with more fields
 /// than the rest do not add a full column of offsets for every row.
 #[derive(Debug)]
-pub(crate) struct Table {
+pub struct Table {
     /// All cells, row by row, without separators.
     text: String,
     /// Cell `i` is `text[cell_bounds[i]..cell_bounds[i + 1]]`.
@@ -48,7 +48,7 @@ pub(crate) struct Table {
 
 /// One row of a `Table`. A row may have fewer cells than `Table::column_count`.
 #[derive(Clone, Copy)]
-pub(crate) struct Row<'a> {
+pub struct Row<'a> {
     text: &'a str,
     /// The bounds of this row's cells, one more than the number of cells.
     bounds: &'a [usize],
@@ -56,7 +56,7 @@ pub(crate) struct Row<'a> {
 
 impl<'a> Row<'a> {
     /// `None` past the end of the row, like `Vec::get`.
-    pub(crate) fn get(&self, col: usize) -> Option<&'a str> {
+    pub fn get(&self, col: usize) -> Option<&'a str> {
         let start = *self.bounds.get(col)?;
         let end = *self.bounds.get(col + 1)?;
         Some(&self.text[start..end])
@@ -78,7 +78,7 @@ impl Table {
         }
     }
 
-    pub(crate) fn row_count(&self) -> usize {
+    pub fn row_count(&self) -> usize {
         self.row_starts.len() - 1
     }
 
@@ -86,7 +86,7 @@ impl Table {
         self.column_count
     }
 
-    pub(crate) fn row(&self, row: usize) -> Option<Row<'_>> {
+    pub fn row(&self, row: usize) -> Option<Row<'_>> {
         let first = *self.row_starts.get(row)?;
         let last = *self.row_starts.get(row + 1)?;
         Some(Row {
@@ -191,17 +191,17 @@ impl Table {
     }
 }
 
-pub(crate) struct CsvData {
-    pub(crate) headers: Vec<String>,
-    pub(crate) rows: Table,
+pub struct CsvData {
+    pub headers: Vec<String>,
+    pub rows: Table,
     /// Original header row + rows before the promoted header (metadata section in files with mixed formats)
-    pub(crate) metadata: Vec<Vec<String>>,
-    /// Problems found while loading the input, shown in the status bar and on stderr
-    pub(crate) warnings: Vec<String>,
+    pub metadata: Vec<Vec<String>>,
+    /// Problems found while loading the input, for the caller to show (the core does not print them)
+    pub warnings: Vec<String>,
 }
 
 impl CsvData {
-    pub(crate) fn from_reader<R: std::io::Read>(reader: R) -> Result<Self, csv::Error> {
+    pub fn from_reader<R: std::io::Read>(reader: R) -> Result<Self, csv::Error> {
         let mut rdr = csv::ReaderBuilder::new()
             .has_headers(true)
             .flexible(true)
@@ -287,7 +287,7 @@ fn find_dominant_field_count(
 }
 
 #[derive(Clone)]
-pub(crate) enum ChartData {
+pub enum ChartData {
     Points(Vec<f64>),
     Bins(Vec<usize>),
     Pairs(Vec<(f64, f64)>),
@@ -295,18 +295,18 @@ pub(crate) enum ChartData {
 
 /// One axis of a chart: the value range the plot maps to and the labels to draw.
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ChartAxis {
-    pub(crate) lo: f64,
-    pub(crate) hi: f64,
+pub struct ChartAxis {
+    pub lo: f64,
+    pub hi: f64,
     /// Position from `lo` (0.0) to `hi` (1.0), and the label to draw there.
-    pub(crate) ticks: Vec<(f32, String)>,
+    pub ticks: Vec<(f32, String)>,
 }
 
 /// `x` is `None` when the horizontal axis is not a value (bar and line charts).
 #[derive(Clone, Debug, PartialEq)]
-pub(crate) struct ChartAxes {
-    pub(crate) y: ChartAxis,
-    pub(crate) x: Option<ChartAxis>,
+pub struct ChartAxes {
+    pub y: ChartAxis,
+    pub x: Option<ChartAxis>,
 }
 
 fn cell_to_string(cell: &calamine::Data) -> String {
@@ -349,11 +349,98 @@ fn unparsable_datetime_warning<'a>(
         .then(|| format!("Date cells that could not be parsed are shown as raw numbers: {count}"))
 }
 
+/// Spreadsheet format named by the input, for `CsvData::from_spreadsheet`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpreadsheetFormat {
+    Xlsx,
+    Xls,
+}
+
+impl SpreadsheetFormat {
+    /// Format for a file extension, ignoring case. `None` means the input is not a spreadsheet.
+    /// Kept in the core so every front end opens the same files.
+    pub fn from_extension(extension: &str) -> Option<Self> {
+        if extension.eq_ignore_ascii_case("xlsx") {
+            Some(Self::Xlsx)
+        } else if extension.eq_ignore_ascii_case("xls") {
+            Some(Self::Xls)
+        } else {
+            None
+        }
+    }
+
+    fn parser(self) -> WorkbookParser {
+        match self {
+            Self::Xlsx => WorkbookParser::Xlsx,
+            Self::Xls => WorkbookParser::Xls,
+        }
+    }
+}
+
+/// calamine's parsers, in the order its own content detection (`open_workbook_auto`) tries them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WorkbookParser {
+    Xls,
+    Xlsx,
+    Xlsb,
+    Ods,
+}
+
+const WORKBOOK_PARSERS: [WorkbookParser; 4] = [
+    WorkbookParser::Xls,
+    WorkbookParser::Xlsx,
+    WorkbookParser::Xlsb,
+    WorkbookParser::Ods,
+];
+
+/// The outer `Err` means this parser cannot open the input, so another parser may. The inner
+/// result is the outcome of reading a workbook that did open.
+fn read_workbook<RS: std::io::Read + std::io::Seek>(
+    reader: RS,
+    parser: WorkbookParser,
+) -> Result<Result<CsvData, String>, calamine::Error> {
+    use calamine::{Ods, Sheets, Xls, Xlsb, Xlsx, open_workbook_from_rs};
+    let workbook = match parser {
+        WorkbookParser::Xls => Sheets::Xls(open_workbook_from_rs::<Xls<_>, _>(reader)?),
+        WorkbookParser::Xlsx => Sheets::Xlsx(open_workbook_from_rs::<Xlsx<_>, _>(reader)?),
+        WorkbookParser::Xlsb => Sheets::Xlsb(open_workbook_from_rs::<Xlsb<_>, _>(reader)?),
+        WorkbookParser::Ods => Sheets::Ods(open_workbook_from_rs::<Ods<_>, _>(reader)?),
+    };
+    Ok(CsvData::from_workbook(workbook))
+}
+
 impl CsvData {
-    pub(crate) fn from_xlsx<P: AsRef<std::path::Path>>(path: P) -> Result<Self, String> {
-        use calamine::{Reader, open_workbook_auto};
-        let mut workbook =
-            open_workbook_auto(&path).map_err(|e| format!("failed to open workbook: {}", e))?;
+    /// Takes a reader instead of a path so the core does not touch the file system, which wasm32
+    /// does not have.
+    ///
+    /// Opens the input as `format` first. If that fails, the other formats are tried, because the
+    /// name can be wrong (an xlsx saved as `.xls`). When none opens it, the error is the one for
+    /// `format`, which says more than "unknown format".
+    pub fn from_spreadsheet<RS: std::io::Read + std::io::Seek>(
+        mut reader: RS,
+        format: SpreadsheetFormat,
+    ) -> Result<Self, String> {
+        let named = format.parser();
+        // Each attempt borrows the reader, so a failed one leaves it available for the next.
+        let named_error = match read_workbook(&mut reader, named) {
+            Ok(result) => return result,
+            Err(e) => e,
+        };
+        for parser in WORKBOOK_PARSERS.into_iter().filter(|&p| p != named) {
+            if reader.rewind().is_err() {
+                break;
+            }
+            if let Ok(result) = read_workbook(&mut reader, parser) {
+                return result;
+            }
+        }
+        Err(format!("failed to open workbook: {named_error}"))
+    }
+
+    fn from_workbook<RS: std::io::Read + std::io::Seek>(
+        mut workbook: calamine::Sheets<RS>,
+    ) -> Result<Self, String> {
+        use calamine::Reader;
         let first_sheet = workbook
             .sheet_names()
             .first()
@@ -389,18 +476,21 @@ impl CsvData {
 }
 
 #[derive(Debug)]
-pub(crate) struct DecodedInput {
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) warning: Option<String>,
+pub struct DecodedInput {
+    pub bytes: Vec<u8>,
+    pub warning: Option<String>,
+    /// Name of the guessed encoding, set only when input that is not valid UTF-8 was decoded with it.
+    /// Returned instead of printed, because the core cannot know where the caller shows messages.
+    pub decoded_as: Option<&'static str>,
 }
 
 /// Detect encoding and decode bytes to UTF-8.
 /// Returns `None` if no conversion is needed: valid UTF-8 that is not ISO-2022-JP.
 /// Returns `Some(Ok(decoded))` on successful transcoding. Input that looks like damaged UTF-8
 /// (see `is_damaged_utf8`) has its invalid bytes replaced with U+FFFD. `decoded.warning` is set
-/// only for that replacement. A guessed encoding for non-UTF-8 input is printed to stderr instead.
+/// only for that replacement. A guessed encoding for non-UTF-8 input goes to `decoded.decoded_as`.
 /// Returns `Some(Err(msg))` if the detected encoding cannot losslessly decode the input.
-pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String>> {
+pub fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String>> {
     let is_valid_utf8 = std::str::from_utf8(bytes).is_ok();
     // ISO-2022-JP is 7-bit with escape sequences, so it also passes UTF-8 validation.
     let may_be_iso_2022_jp = bytes.is_ascii() && bytes.contains(&0x1B);
@@ -412,6 +502,7 @@ pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String
         return Some(Ok(DecodedInput {
             bytes: String::from_utf8_lossy(bytes).into_owned().into_bytes(),
             warning: Some("Input contains invalid UTF-8 bytes; replaced with U+FFFD".to_string()),
+            decoded_as: None,
         }));
     }
 
@@ -430,17 +521,10 @@ pub(crate) fn decode_to_utf8(bytes: &[u8]) -> Option<Result<DecodedInput, String
             actual_encoding.name()
         )));
     }
-    if !is_valid_utf8 {
-        // The guess can be wrong, so leave a clue on stderr. It stays out of the status bar because
-        // correctly decoded legacy files would otherwise show a warning every time.
-        eprintln!(
-            "Warning: Input is not valid UTF-8; decoded as {}",
-            actual_encoding.name()
-        );
-    }
     Some(Ok(DecodedInput {
         bytes: decoded.into_owned().into_bytes(),
         warning: None,
+        decoded_as: (!is_valid_utf8).then(|| actual_encoding.name()),
     }))
 }
 
@@ -737,17 +821,19 @@ mod tests {
         let decoded = std::str::from_utf8(&result.bytes).unwrap();
         assert!(decoded.contains("名前"));
         assert!(result.warning.is_none());
+        assert_eq!(result.decoded_as, Some("Shift_JIS"));
     }
 
     #[test]
     fn decode_damaged_utf8_warns_about_replacement() {
         let bytes = [b"\xEF\xBB\xBFa,b\n1,".as_slice(), b"\xFF\n"].concat();
-        let warning = decode_to_utf8(&bytes)
+        let decoded = decode_to_utf8(&bytes)
             .expect("should need conversion")
-            .expect("should decode without errors")
-            .warning
-            .expect("replacement should warn");
+            .expect("should decode without errors");
+        let warning = decoded.warning.expect("replacement should warn");
         assert!(warning.contains("U+FFFD"), "{warning}");
+        // Treated as UTF-8, so no other encoding was guessed.
+        assert_eq!(decoded.decoded_as, None);
     }
 
     #[test]
@@ -757,6 +843,105 @@ mod tests {
             .expect("should need conversion")
             .expect("should decode without errors");
         assert!(decoded.warning.is_none());
+        // ISO-2022-JP is also valid UTF-8, so it is not reported as a guess.
+        assert_eq!(decoded.decoded_as, None);
+    }
+
+    // --- from_spreadsheet ---
+
+    /// Smallest xlsx that calamine reads: one sheet of inline strings.
+    fn minimal_xlsx(rows: &[&[&str]]) -> Vec<u8> {
+        use std::io::Write;
+        let cells = |row: &[&str]| -> String {
+            row.iter()
+                .map(|v| format!(r#"<c t="inlineStr"><is><t>{v}</t></is></c>"#))
+                .collect()
+        };
+        let sheet_rows: String = rows
+            .iter()
+            .map(|row| format!("<row>{}</row>", cells(row)))
+            .collect();
+        let main_ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
+        let rel_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships";
+        let files = [
+            (
+                "_rels/.rels",
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel_ns}/officeDocument" Target="xl/workbook.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "xl/workbook.xml",
+                format!(
+                    r#"<workbook xmlns="{main_ns}" xmlns:r="{rel_ns}"><sheets><sheet name="Sheet1" sheetId="1" r:id="rId1"/></sheets></workbook>"#
+                ),
+            ),
+            (
+                "xl/_rels/workbook.xml.rels",
+                format!(
+                    r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="{rel_ns}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>"#
+                ),
+            ),
+            (
+                "xl/worksheets/sheet1.xml",
+                format!(
+                    r#"<worksheet xmlns="{main_ns}"><sheetData>{sheet_rows}</sheetData></worksheet>"#
+                ),
+            ),
+        ];
+        let mut zip = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        for (name, body) in files {
+            zip.start_file(name, options).unwrap();
+            zip.write_all(body.as_bytes()).unwrap();
+        }
+        zip.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn spreadsheet_format_from_extension_ignores_case() {
+        assert_eq!(
+            SpreadsheetFormat::from_extension("XLSX"),
+            Some(SpreadsheetFormat::Xlsx)
+        );
+        assert_eq!(
+            SpreadsheetFormat::from_extension("xls"),
+            Some(SpreadsheetFormat::Xls)
+        );
+        assert_eq!(SpreadsheetFormat::from_extension("csv"), None);
+    }
+
+    #[test]
+    fn from_spreadsheet_reads_xlsx() {
+        let bytes = minimal_xlsx(&[&["name", "age"], &["Alice", "30"]]);
+        let data = CsvData::from_spreadsheet(std::io::Cursor::new(bytes), SpreadsheetFormat::Xlsx)
+            .unwrap();
+        assert_eq!(data.headers, vec!["name", "age"]);
+        assert_eq!(data.rows.cell(0, 0), Some("Alice"));
+        assert_eq!(data.rows.cell(0, 1), Some("30"));
+    }
+
+    #[test]
+    fn from_spreadsheet_falls_back_when_the_name_is_wrong() {
+        // An xlsx saved with an .xls name
+        let bytes = minimal_xlsx(&[&["name"], &["Alice"]]);
+        let data =
+            CsvData::from_spreadsheet(std::io::Cursor::new(bytes), SpreadsheetFormat::Xls).unwrap();
+        assert_eq!(data.headers, vec!["name"]);
+        assert_eq!(data.rows.cell(0, 0), Some("Alice"));
+    }
+
+    #[test]
+    fn from_spreadsheet_reports_the_named_format_error() {
+        let input = std::io::Cursor::new(b"a,b\n1,2\n");
+        let Err(error) = CsvData::from_spreadsheet(input, SpreadsheetFormat::Xlsx) else {
+            panic!("CSV text is not a workbook");
+        };
+        assert!(
+            error.starts_with("failed to open workbook: Xlsx error: "),
+            "{error}"
+        );
     }
 
     // --- warnings ---

@@ -921,15 +921,24 @@ dependencies = [
 name = "csvr"
 version = "0.3.0"
 dependencies = [
- "calamine",
- "chardetng",
- "csv",
- "encoding_rs",
+ "csvr-core",
  "futures-lite",
  "gpui",
  "gpui_platform",
  "objc",
  "regex",
+]
+
+[[package]]
+name = "csvr-core"
+version = "0.3.0"
+dependencies = [
+ "calamine",
+ "chardetng",
+ "csv",
+ "encoding_rs",
+ "regex",
+ "zip",
 ]
 
 [[package]]

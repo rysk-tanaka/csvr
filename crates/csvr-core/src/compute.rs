@@ -12,7 +12,7 @@ pub(crate) const MAX_COL_WIDTH: f32 = 400.0;
 pub(crate) const COL_PADDING: f32 = 24.0;
 pub(crate) const ROW_NUM_WIDTH: f32 = 16.0;
 
-pub(crate) fn compute_column_widths(data: &CsvData) -> Vec<f32> {
+pub fn compute_column_widths(data: &CsvData) -> Vec<f32> {
     let sample_count = data.rows.row_count().min(100);
     data.headers
         .iter()
@@ -32,14 +32,14 @@ pub(crate) fn compute_column_widths(data: &CsvData) -> Vec<f32> {
         .collect()
 }
 
-pub(crate) fn row_number_col_width(total_rows: usize) -> f32 {
+pub fn row_number_col_width(total_rows: usize) -> f32 {
     let digits = total_rows.max(1).ilog10() as usize + 1;
     (digits as f32 * CHAR_WIDTH + ROW_NUM_WIDTH).max(40.0)
 }
 
 /// The list clamps its scroll offset only during prepaint, after the header has been built,
 /// so the header needs the same limit to stay aligned at the right edge.
-pub(crate) fn clamp_h_offset(offset: f32, content_width: f32, viewport_width: f32) -> f32 {
+pub fn clamp_h_offset(offset: f32, content_width: f32, viewport_width: f32) -> f32 {
     let max_scroll = (content_width - viewport_width).max(0.0);
     offset.clamp(-max_scroll, 0.0)
 }
@@ -47,12 +47,7 @@ pub(crate) fn clamp_h_offset(offset: f32, content_width: f32, viewport_width: f3
 /// Returns the scroll offset that brings a column into the area right of the pinned section,
 /// moving as little as possible. A column wider than the area aligns to its left edge so the
 /// start of the value stays visible.
-pub(crate) fn h_offset_to_reveal(
-    offset: f32,
-    col_start: f32,
-    col_width: f32,
-    visible_width: f32,
-) -> f32 {
+pub fn h_offset_to_reveal(offset: f32, col_start: f32, col_width: f32, visible_width: f32) -> f32 {
     // The pinned section can fill the window, leaving no area to scroll the column into.
     if visible_width <= 0.0 {
         return offset;
@@ -72,7 +67,7 @@ pub(crate) fn h_offset_to_reveal(
 /// Where each original row sits in a filtered order. A filter task builds it off the UI thread,
 /// so the result can be anchored to whatever the view shows when it arrives with lookups only,
 /// even if the user scrolled or changed the selection while the task ran.
-pub(crate) struct RowPositions {
+pub struct RowPositions {
     /// Indexed by original row; `NOT_SHOWN` for rows the order leaves out. `u32` halves the
     /// size, since this has an entry for every row in the file and is rebuilt on each keystroke.
     positions: Vec<u32>,
@@ -82,7 +77,7 @@ pub(crate) struct RowPositions {
 impl RowPositions {
     const NOT_SHOWN: u32 = u32::MAX;
 
-    pub(crate) fn new(order: &[usize], row_count: usize) -> Self {
+    pub fn new(order: &[usize], row_count: usize) -> Self {
         let mut positions = vec![Self::NOT_SHOWN; row_count];
         for (pos, &row) in order.iter().enumerate() {
             // Positions past u32 would need more rows than fit in memory as strings.
@@ -98,7 +93,7 @@ impl RowPositions {
     }
 
     /// Position of `row` in the order, or `None` if the order leaves it out.
-    pub(crate) fn get(&self, row: usize) -> Option<usize> {
+    pub fn get(&self, row: usize) -> Option<usize> {
         self.positions
             .get(row)
             .copied()
@@ -110,7 +105,7 @@ impl RowPositions {
 /// Position in `new` to show at the top of the view when the filtered rows change from `old`:
 /// the first row at or after `old[top]` that is still in `new`, or the last row of `new` if
 /// there is none. Returns `None` if either list is empty, since there is nothing to keep.
-pub(crate) fn anchored_position(old: &[usize], new: &RowPositions, top: usize) -> Option<usize> {
+pub fn anchored_position(old: &[usize], new: &RowPositions, top: usize) -> Option<usize> {
     if old.is_empty() {
         return None;
     }
@@ -162,7 +157,7 @@ impl SearchQuery {
 
 /// The `/` search and the `&` regex filter, prepared once per query so that the rows can be
 /// checked in chunks off the UI thread.
-pub(crate) struct RowFilter {
+pub struct RowFilter {
     query: SearchQuery,
     /// Compiled `&` pattern and its target column; `None` when the pattern is empty or invalid.
     regex: Option<(Regex, Option<usize>)>,
@@ -171,7 +166,7 @@ pub(crate) struct RowFilter {
 impl RowFilter {
     /// An invalid `pattern` is ignored so that the `/` search still narrows the rows; check it
     /// with `is_valid_pattern` to show the error.
-    pub(crate) fn new(query: &str, pattern: &str, target_col: Option<usize>) -> Self {
+    pub fn new(query: &str, pattern: &str, target_col: Option<usize>) -> Self {
         Self::with_search(SearchQuery::new(query, None), pattern, target_col)
     }
 
@@ -185,7 +180,7 @@ impl RowFilter {
     }
 
     /// Whether the `&` filter accepts `pattern`. An empty pattern is valid and filters nothing.
-    pub(crate) fn is_valid_pattern(pattern: &str) -> bool {
+    pub fn is_valid_pattern(pattern: &str) -> bool {
         pattern.is_empty() || Self::build_regex(pattern).is_ok()
     }
 
@@ -208,7 +203,7 @@ impl RowFilter {
 
     /// Append the indices in `range` whose rows match. Called chunk by chunk so that a task can
     /// yield between chunks.
-    pub(crate) fn filter_range(&self, rows: &Table, range: Range<usize>, out: &mut Vec<usize>) {
+    pub fn filter_range(&self, rows: &Table, range: Range<usize>, out: &mut Vec<usize>) {
         let end = range.end.min(rows.row_count());
         let start = range.start.min(end);
         out.extend((start..end).filter(|&i| rows.row(i).is_some_and(|row| self.matches(row))));
@@ -216,7 +211,7 @@ impl RowFilter {
 }
 
 /// Determine which columns are numeric based on all rows.
-pub(crate) fn compute_numeric_columns(rows: &Table, col_count: usize) -> Vec<bool> {
+pub fn compute_numeric_columns(rows: &Table, col_count: usize) -> Vec<bool> {
     (0..col_count)
         .map(|col| {
             let mut numeric_count: usize = 0;
@@ -239,7 +234,7 @@ pub(crate) fn compute_numeric_columns(rows: &Table, col_count: usize) -> Vec<boo
 /// Reorder rows already filtered for the current queries, for a sort change alone. Starts from
 /// file order, as a full refilter does, so rows that tie in the sort column keep file order
 /// instead of the order of the previous sort. With no sort, the result is file order.
-pub(crate) fn reorder_indices(
+pub fn reorder_indices(
     rows: &Table,
     shown: &[usize],
     sort: Option<(usize, bool, SortDirection)>,
@@ -254,7 +249,7 @@ pub(crate) fn reorder_indices(
     }
 }
 
-pub(crate) fn sort_indices(
+pub fn sort_indices(
     rows: &Table,
     indices: &[usize],
     col: usize,
@@ -292,11 +287,7 @@ pub(crate) fn sort_indices(
 
 /// Extract finite numeric values from a specific column for the given row indices.
 /// Non-numeric, NaN, Infinity, and missing values are skipped.
-pub(crate) fn extract_column_values(
-    rows: &Table,
-    indices: &[usize],
-    col: usize,
-) -> Vec<(usize, f64)> {
+pub fn extract_column_values(rows: &Table, indices: &[usize], col: usize) -> Vec<(usize, f64)> {
     indices
         .iter()
         .filter_map(|&i| {
@@ -312,7 +303,7 @@ pub(crate) fn extract_column_values(
 /// Downsample a slice to at most `max` points using uniform stride selection.
 /// When `max >= 2`, first and last elements are always included to preserve data range boundaries.
 /// Returns empty when `max` is 0.
-pub(crate) fn downsample<T: Copy>(values: &[T], max: usize) -> Vec<T> {
+pub fn downsample<T: Copy>(values: &[T], max: usize) -> Vec<T> {
     if max == 0 {
         return Vec::new();
     }
@@ -334,7 +325,7 @@ pub(crate) fn downsample<T: Copy>(values: &[T], max: usize) -> Vec<T> {
 
 /// Extract paired finite numeric values from two columns for the given row indices.
 /// Only rows where both columns have a valid finite number are included.
-pub(crate) fn extract_scatter_pairs(
+pub fn extract_scatter_pairs(
     rows: &Table,
     indices: &[usize],
     x_col: usize,
@@ -361,24 +352,20 @@ pub(crate) fn extract_scatter_pairs(
 
 /// Summary statistics for a numeric column.
 #[derive(Debug, Clone, PartialEq)]
-pub(crate) struct ColumnStats {
-    pub(crate) count: usize,
-    pub(crate) sum: f64,
-    pub(crate) min: f64,
-    pub(crate) max: f64,
-    pub(crate) mean: f64,
-    pub(crate) median: f64,
-    pub(crate) stddev: f64,
+pub struct ColumnStats {
+    pub count: usize,
+    pub sum: f64,
+    pub min: f64,
+    pub max: f64,
+    pub mean: f64,
+    pub median: f64,
+    pub stddev: f64,
 }
 
 /// Compute summary statistics for a numeric column over the given row indices.
 /// Collects values into a Vec for median (requires sorting) and stddev (two-pass).
 /// Returns `None` if no finite numeric values exist.
-pub(crate) fn compute_column_stats(
-    rows: &Table,
-    indices: &[usize],
-    col: usize,
-) -> Option<ColumnStats> {
+pub fn compute_column_stats(rows: &Table, indices: &[usize], col: usize) -> Option<ColumnStats> {
     let mut values: Vec<f64> = Vec::new();
     let mut sum: f64 = 0.0;
     let mut min: f64 = f64::INFINITY;
@@ -437,7 +424,7 @@ pub(crate) fn compute_column_stats(
 
 /// Return indices of columns whose header matches the regex pattern (case-insensitive).
 /// Empty pattern returns all column indices.
-pub(crate) fn filter_columns_by_regex(
+pub fn filter_columns_by_regex(
     headers: &[String],
     pattern: &str,
 ) -> Result<Vec<usize>, regex::Error> {
@@ -456,7 +443,7 @@ pub(crate) fn filter_columns_by_regex(
 /// Parse column filter query: "col:pattern" returns (Some(col_index), pattern),
 /// plain "pattern" returns (None, pattern). If col name doesn't match any header,
 /// treats the whole string as a global pattern.
-pub(crate) fn parse_column_filter(query: &str, headers: &[String]) -> (Option<usize>, String) {
+pub fn parse_column_filter(query: &str, headers: &[String]) -> (Option<usize>, String) {
     if let Some((prefix, suffix)) = query.split_once(':')
         && let Some(idx) = headers.iter().position(|h| h.eq_ignore_ascii_case(prefix))
     {
@@ -466,7 +453,7 @@ pub(crate) fn parse_column_filter(query: &str, headers: &[String]) -> (Option<us
 }
 
 /// Compute histogram bin counts for the given values.
-pub(crate) fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<usize> {
+pub fn compute_histogram_bins(values: &[f64], bin_count: usize) -> Vec<usize> {
     if values.is_empty() || bin_count == 0 {
         return vec![0; bin_count];
     }
@@ -547,7 +534,7 @@ fn axis_from_bounds(bounds: Option<(f64, f64)>) -> ChartAxis {
 }
 
 /// Axes for bar and line charts. Bars start from zero when all values are positive.
-pub(crate) fn points_axes(values: &[f64], include_zero: bool) -> ChartAxes {
+pub fn points_axes(values: &[f64], include_zero: bool) -> ChartAxes {
     let bounds = value_bounds(values.iter().copied())
         .map(|(min, max)| (if include_zero { min.min(0.0) } else { min }, max));
     ChartAxes {
@@ -556,14 +543,14 @@ pub(crate) fn points_axes(values: &[f64], include_zero: bool) -> ChartAxes {
     }
 }
 
-pub(crate) fn pairs_axes(pairs: &[(f64, f64)]) -> ChartAxes {
+pub fn pairs_axes(pairs: &[(f64, f64)]) -> ChartAxes {
     ChartAxes {
         y: axis_from_bounds(value_bounds(pairs.iter().map(|p| p.1))),
         x: Some(axis_from_bounds(value_bounds(pairs.iter().map(|p| p.0)))),
     }
 }
 
-pub(crate) fn histogram_axes(values: &[f64], bins: &[usize]) -> ChartAxes {
+pub fn histogram_axes(values: &[f64], bins: &[usize]) -> ChartAxes {
     let max_count = bins.iter().copied().max().unwrap_or(0);
     let y = if max_count == 0 {
         empty_axis()
@@ -592,7 +579,7 @@ pub(crate) fn histogram_axes(values: &[f64], bins: &[usize]) -> ChartAxes {
     ChartAxes { y, x: Some(x) }
 }
 
-pub(crate) fn chart_legend(chart_type: ChartType, y_name: &str, x_name: &str) -> String {
+pub fn chart_legend(chart_type: ChartType, y_name: &str, x_name: &str) -> String {
     // shape_line expects a single line.
     let single_line = |name: &str| name.replace(['\r', '\n'], " ");
     match chart_type {
@@ -648,13 +635,13 @@ fn deduplicate_json_keys(headers: &[String], visible_col_indices: &[usize]) -> V
     keys
 }
 
-pub(crate) fn copied_status_message(format_name: &str, row_count: usize) -> String {
+pub fn copied_status_message(format_name: &str, row_count: usize) -> String {
     let unit = if row_count == 1 { "row" } else { "rows" };
     format!("Copied as {format_name} ({row_count} {unit})")
 }
 
 /// Export visible data as JSON (array of objects).
-pub(crate) fn export_json(
+pub fn export_json(
     headers: &[String],
     rows: &Table,
     filtered_indices: &[usize],
@@ -700,7 +687,7 @@ fn escape_markdown_cell(s: &str) -> String {
 }
 
 /// Export visible data as GitHub-flavored Markdown table.
-pub(crate) fn export_markdown(
+pub fn export_markdown(
     headers: &[String],
     rows: &Table,
     filtered_indices: &[usize],

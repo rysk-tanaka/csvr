@@ -9,15 +9,18 @@ use gpui::{
 };
 use regex::RegexBuilder;
 
-use crate::chart::{CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart};
-use crate::compute::{
+use csvr_core::compute::{
     ColumnStats, RowFilter, RowPositions, anchored_position, chart_legend, clamp_h_offset,
     compute_column_stats, compute_column_widths, compute_histogram_bins, compute_numeric_columns,
     copied_status_message, downsample, export_json, export_markdown, extract_column_values,
     extract_scatter_pairs, filter_columns_by_regex, h_offset_to_reveal, histogram_axes, pairs_axes,
     parse_column_filter, points_axes, reorder_indices, row_number_col_width, sort_indices,
 };
-use crate::data::{CHART_TYPES, ChartAxes, ChartData, ChartType, CsvData, SortDirection, Table};
+use csvr_core::data::{
+    CHART_TYPES, ChartAxes, ChartData, ChartType, CsvData, SortDirection, Table,
+};
+
+use crate::chart::{CHART_BLUE, CHART_CANVAS_HEIGHT, CHART_GREEN, CHART_PEACH, draw_chart};
 
 actions!(
     csvr,

@@ -1,24 +1,31 @@
 mod app;
 mod chart;
-mod compute;
-mod data;
 
 use std::io::Cursor;
 use std::io::IsTerminal;
 
 use gpui::{App, AppContext, Bounds, KeyBinding, QuitMode, WindowBounds, WindowOptions, px, size};
 
+use csvr_core::data::{CsvData, DecodedInput, SpreadsheetFormat, decode_to_utf8};
+
 use crate::app::{
     CopySelection, CsvrApp, DismissSearch, ExportJson, ExportMarkdown, Quit, ToggleChart,
     ToggleSearch,
 };
-use crate::data::{CsvData, decode_to_utf8};
 
 fn print_usage_and_exit(msg: &str) -> ! {
     eprintln!("Error: {}", msg);
     eprintln!("Usage: csvr <file.csv|file.xlsx|file.xls>");
     eprintln!("   or: cat file.csv | csvr");
     std::process::exit(1);
+}
+
+/// The guess can be wrong, so leave a clue on stderr. It stays out of the status bar because
+/// correctly decoded legacy files would otherwise show a warning every time.
+fn report_guessed_encoding(decoded: &DecodedInput) {
+    if let Some(name) = decoded.decoded_as {
+        eprintln!("Warning: Input is not valid UTF-8; decoded as {name}");
+    }
 }
 
 fn load_csv() -> CsvData {
@@ -30,16 +37,21 @@ fn load_csv() -> CsvData {
     }
     if args.len() == 2 {
         let path = &args[1];
-        let is_spreadsheet = std::path::Path::new(path)
+        let spreadsheet_format = std::path::Path::new(path)
             .extension()
             .and_then(|ext| ext.to_str())
-            .is_some_and(|ext| ext.eq_ignore_ascii_case("xlsx") || ext.eq_ignore_ascii_case("xls"));
+            .and_then(SpreadsheetFormat::from_extension);
 
-        if is_spreadsheet {
-            return CsvData::from_xlsx(path).unwrap_or_else(|e| {
-                eprintln!("Error: {}", e);
+        if let Some(format) = spreadsheet_format {
+            let file = std::fs::File::open(path).unwrap_or_else(|e| {
+                eprintln!("Error: cannot open '{}': {}", path, e);
                 std::process::exit(1);
             });
+            return CsvData::from_spreadsheet(std::io::BufReader::new(file), format)
+                .unwrap_or_else(|e| {
+                    eprintln!("Error: {}", e);
+                    std::process::exit(1);
+                });
         }
 
         let bytes = std::fs::read(path).unwrap_or_else(|e| {
@@ -51,6 +63,7 @@ fn load_csv() -> CsvData {
         let reader: Box<dyn std::io::Read> = match decode_to_utf8(&bytes) {
             Some(Ok(decoded)) => {
                 drop(bytes);
+                report_guessed_encoding(&decoded);
                 decode_warning = decoded.warning;
                 Box::new(Cursor::new(decoded.bytes))
             }
@@ -85,7 +98,10 @@ fn load_csv() -> CsvData {
             std::process::exit(1);
         });
         let (transcoded, decode_warning) = match decode_to_utf8(&bytes) {
-            Some(Ok(decoded)) => (decoded.bytes, decoded.warning),
+            Some(Ok(decoded)) => {
+                report_guessed_encoding(&decoded);
+                (decoded.bytes, decoded.warning)
+            }
             Some(Err(e)) => {
                 eprintln!("Error: {}", e);
                 std::process::exit(1);

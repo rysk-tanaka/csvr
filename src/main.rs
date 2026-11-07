@@ -6,6 +6,8 @@ mod chart;
 mod native;
 #[cfg(target_family = "wasm")]
 mod web;
+#[cfg(target_family = "wasm")]
+mod welcome;
 
 fn main() {
     #[cfg(not(target_family = "wasm"))]

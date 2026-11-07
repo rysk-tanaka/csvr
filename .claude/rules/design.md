@@ -18,7 +18,7 @@ paths:
 - `select_cell(filtered_idx, col)` — セル選択。`col=None` で行全体選択
 - `clear_selection()` — 選択解除（Escape で呼ばれる）
 - `move_selection(row_delta, col_delta, viewport_width)` — 矢印キーによるカーソル移動 + `ensure_visible`（縦）と `ensure_col_visible`（横）で自動スクロール。上下キーでも選択中のセルが見えるように横へ動かす。固定列と行全体の選択では横に動かさない。列変更時のみ `recompute_column_stats` を呼ぶ（行のみ移動時はスキップ）
-- `copy_selection(cx)` — 選択中のセル値（またはタブ区切り行）をクリップボードにコピー（`Cmd+C`）
+- `copy_selection(cx)` — 選択中のセル値（またはタブ区切り行）をクリップボードにコピー（`Cmd+C`）。書き込みはエクスポートと同じ `write_clipboard` を通す
 - `toggle_chart()` — チャートパネルの表示/非表示切替（`Cmd+G`）
 - `set_chart_type(ct)` — チャートタイプ変更（Bar / Line / Scatter / Histogram）
 - `set_chart_col(col)` / `set_chart_x_col(col)` — チャート対象列の変更（数値列のみ）+ `recompute_chart_data`
@@ -33,6 +33,7 @@ paths:
 ## ステータスバー
 
 - **読み込み時の警告は表示し続ける** — `CsvData.warnings` を `load_warning` に保持。表示中のデータに関する情報で、起動直後に見逃すことがあるため。stderr にはネイティブ版の `native::run` でまとめて出す。推定した文字コード名は `decode_to_utf8` が `DecodedInput.decoded_as` で返し、ネイティブ版は stderr だけに、ブラウザ版はコンソールだけに出す（コアは表示先を知らないので出力しない）。正しく読めた Shift_JIS の CSV に毎回警告が出ると、本当の警告が目立たなくなるため
+- **ブラウザ版のコピーは結果を待って知らせる** — `write_clipboard` は、ネイティブ版では書き込んですぐにメッセージを出す。ブラウザ版は `browser::write_clipboard_text` の結果を `clipboard_task` で待ち、成功ならメッセージ、失敗なら `Copy failed: <理由>` を出す。ブラウザは https か localhost でないと `navigator.clipboard` がなく、許可がないと拒否するが、gpui_web の `write_to_clipboard` はどちらも知らせない。書き込みはキー入力のイベントの中で始める（ブラウザがユーザー操作の中でだけ許すため）
 - **操作の結果は一時メッセージ** — `show_status_message` で `status_message` に設定し、`STATUS_MESSAGE_DURATION` のあとで消す。タイマーの `Task` を保持して置き換えると前のタイマーが止まるので、新しいメッセージは全期間表示される。表示欄は 1 つで、一時メッセージを優先し、消えると警告に戻る
 - **エクスポートはデータがなければクリップボードを書き換えない** — 表示列が空、または表示行が 0 件のときは `No data to export` と表示する。`export_json` などはこの場合も `[]` やヘッダーを返すので、`finish_export` で判定する
 - **メッセージと統計は内容の幅に応じて縮める** — どちらも省略表示にする。ウィンドウが狭くても両方の一部が見える。GPUI は `whitespace_nowrap` でも改行で行を分けるので、1 行に保つためにシート名の改行は空白に置き換える

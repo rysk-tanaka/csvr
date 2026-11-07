@@ -37,10 +37,10 @@ GPUI は Metal シェーダーをコンパイルするため、通常の Rust �
 
 ## アーキテクチャ
 
-cargo workspace の 2 クレート・4 モジュール構成。依存関係: `data`(基盤) ← `compute`, `chart` ← `app` ← `native`, `web` ← `main`。循環依存なし。
+cargo workspace の 2 クレート・4 モジュール構成。依存関係: `data`(基盤) ← `compute`, `chart`, `browser` ← `app` ← `native`, `web` ← `main`。循環依存なし。
 
 - `csvr-core`（`crates/csvr-core`）— `data` と `compute`。GPUI に依存せず、ブラウザ版（gpui_web）と共有するため wasm32 でもビルドできるように保つ。ファイル・stderr・スレッドを使わない
-- `csvr`（ルートの `Cargo.toml`）— `main`・`native`・`web`・`app`・`chart`。GPUI を使うバイナリ。wasm32 ではブラウザ版（試作）になり、`main` が `native::run` と `web::run` を切り替える。`csvr_core::data` / `csvr_core::compute` を参照する。ルートを bin パッケージのまま残しているのは、`cargo run`・`target/release/csvr`・リリースの version 読み取り（`auto-release.yml`）を変えないため
+- `csvr`（ルートの `Cargo.toml`）— `main`・`native`・`web`・`browser`・`app`・`chart`。GPUI を使うバイナリ。wasm32 ではブラウザ版（試作）になり、`main` が `native::run` と `web::run` を切り替える。`csvr_core::data` / `csvr_core::compute` を参照する。ルートを bin パッケージのまま残しているのは、`cargo run`・`target/release/csvr`・リリースの version 読み取り（`auto-release.yml`）を変えないため
 
 ```text
 crates/csvr-core/src/
@@ -50,7 +50,8 @@ crates/csvr-core/src/
 src/
   main.rs      -- エントリポイント（native / web の run を呼ぶだけ）
   native.rs    -- ネイティブ版（load_csv, set_dock_icon, run）
-  web.rs       -- ブラウザ版（フォントの読み込み、サンプル CSV、ドロップされたファイルの読み込み）
+  web.rs       -- ブラウザ版（フォントの読み込み、サンプル CSV、ドロップや選択で開いたファイルの読み込み）
+  browser.rs   -- ブラウザ版の下回り（クリップボードへの書き込み、JS のエラー文）。app からも使うので web と分ける
   chart.rs     -- draw_chart + チャートカラー定数
   app.rs       -- CsvrApp, TableRow, UIカラー定数, actions!
 ```
@@ -62,7 +63,7 @@ src/
 
 入力の流れ: `load_csv()`（CLI引数 or stdin） → xlsx/xls なら開いたファイルを `CsvData::from_spreadsheet` に渡す、それ以外は `decode_to_utf8` → `CsvData::from_reader` → `CsvrApp::new(data, window, cx)`（列幅を実際のフォントで測る） → GPUI ウィンドウ
 
-ブラウザ版の流れ: `web::run()` → `WebPlatform`（シングルスレッド、日本語は `CanvasFontFallback::EmojiAndCjk` でブラウザのフォントに描かせる）→ IBM Plex Sans（`assets/fonts/ibm-plex-sans`、OFL）を `add_fonts` → `on_missing_glyphs` で足りない字を待つ → サンプル CSV で `CsvrApp` → `document` の `drop` で受けたファイルを読み、`CsvrApp::new` で置き換える。gpui_web はドロップされたファイルをアプリに渡さないので、`web-sys` で自分で受け取る。キーは `key_bindings` を `cmd` と `ctrl` の両方で割り当てる（web の `cmd` はどの OS でも Meta キーのため）。どのフォントにもない字が初めて出たら、IBM Plex Sans JP（Regular と SemiBold）を jsDelivr から 2 つ同時に取り、`add_fonts` し、列幅を測り直してから `refresh_windows` で描き直す（`add_fonts` は読めないフォントでも成功を返すが、中身は SRI のハッシュで固定しているので確かめない）
+ブラウザ版の流れ: `web::run()` → `WebPlatform`（シングルスレッド、日本語は `CanvasFontFallback::EmojiAndCjk` でブラウザのフォントに描かせる）→ IBM Plex Sans（`assets/fonts/ibm-plex-sans`、OFL）を `add_fonts` → `on_missing_glyphs` で足りない字を待つ → サンプル CSV で `CsvrApp` → `document` の `drop` で受けたファイルや、`OpenFile`（`cmd-o` / `ctrl-o`、ステータスバーの Open file）で隠した `<input type="file">` から選んだファイルを、`FileOpener` が読み、`CsvrApp::new` で置き換える（後から始めた方が残る）。gpui_web はドロップされたファイルをアプリに渡さず、ファイルを選ぶ画面も開けないので、`web-sys` で自分で扱う。`OpenFile` は app の要素では受けず、`web` が `cx.on_action` で受ける（app は web を呼べないため）。コピーは `browser::write_clipboard_text` で書き込みの結果を待つ（gpui_web の `write_to_clipboard` は結果を捨てる）。キーは `key_bindings` を `cmd` と `ctrl` の両方で割り当てる（web の `cmd` はどの OS でも Meta キーのため）。どのフォントにもない字が初めて出たら、IBM Plex Sans JP（Regular と SemiBold）を jsDelivr から 2 つ同時に取り、`add_fonts` し、列幅を測り直してから `refresh_windows` で描き直す（`add_fonts` は読めないフォントでも成功を返すが、中身は SRI のハッシュで固定しているので確かめない）
 
 `set_dock_icon()` は `assets/icon.png` を `include_bytes!` で埋め込み、`objc` クレートで `NSApplication.setApplicationIconImage:` を呼び出して Dock アイコンを設定する。アイコンは Lucide Icons の file-spreadsheet（ISC License、帰属表示は `assets/LICENSE`）を Catppuccin Mocha カラーで調整したもの
 
@@ -91,7 +92,7 @@ Rust 2024 edition（`edition = "2024"`）を使用。GPUI のバージョンは 
 
 ## 既知の設計トレードオフ
 
-- **ブラウザ版（試作）の制約**: `gpui_platform` の既定の feature `multithreaded`（nightly・COOP/COEP が必要）を切り、シングルスレッドで stable のままビルドする。フィルタは区切って処理するので固まらないが、ソートは区切らないので大きいファイルでは終わるまで入力を受け付けない。IBM Plex Sans にない文字のうち、CJK と絵文字はブラウザのフォントで描く（おおよその描画）が、それ以外の字（全角英数字、半角カナ、「〜」「①」「㈱」「▲」など）がデータや入力欄（IME で入力した全角英数字や「〜」も含む）に出ると（データは表示した行のほか、列幅を測る先頭 100 行も含む）、IBM Plex Sans JP の Regular と SemiBold を jsDelivr から読み込む（合わせて転送 約 6MB、展開後 約 11MB）。URL はコミットに、中身は SRI のハッシュに固定している。読み込むまでは豆腐で、読み込んだあとは日本語（漢字・かな）もこのフォントで描く。ハングルはこのフォントにないので、読み込んだあともブラウザのフォントで描く。外部の CDN に頼るので、オフラインや読み込みに失敗したときは豆腐のまま（取りに行くのはページを開いている間に 1 回だけ）。読み込むと、ページを開いたことが jsDelivr に伝わる。日本語フォントにもない字（アラビア文字やタイ文字など）が出たときも 1 回読み込む。ソートの目印を ↑↓ にしているのは、▲▼ だと IBM Plex Sans にないため、ソートだけで読み込みが起きるから。`/` `*` `&` の入力欄は IME で日本語を入力できる（ネイティブ版も同じ）。gpui_web は見えない textarea で入力を受けるので、`ctrl-b` などでブラウザがカーソルを動かすことがあり、そのときはカーソルを表示した位置で編集する（矢印キーではカーソルを動かせない）。ドロップしたファイルの読み込み（文字コードの変換とパース）は区切らずに処理するので、大きいファイルでは終わるまで画面が固まり、読み込み中の表示もない。読み込みの失敗と推定した文字コード名はブラウザのコンソールにだけ出る（`eprintln!` はブラウザでは出ない）。一度に開くのは最初の 1 ファイルだけ。Windows / Linux のブラウザでは `ctrl-shift-j`（Chrome の DevTools）や `ctrl-shift-m`（Firefox のレスポンシブデザインモード）がブラウザに取られることがある。クリップボードへの書き込みは https か localhost でないと黙って失敗する
+- **ブラウザ版（試作）の制約**: `gpui_platform` の既定の feature `multithreaded`（nightly・COOP/COEP が必要）を切り、シングルスレッドで stable のままビルドする。フィルタは区切って処理するので固まらないが、ソートは区切らないので大きいファイルでは終わるまで入力を受け付けない。IBM Plex Sans にない文字のうち、CJK と絵文字はブラウザのフォントで描く（おおよその描画）が、それ以外の字（全角英数字、半角カナ、「〜」「①」「㈱」「▲」など）がデータや入力欄（IME で入力した全角英数字や「〜」も含む）に出ると（データは表示した行のほか、列幅を測る先頭 100 行も含む）、IBM Plex Sans JP の Regular と SemiBold を jsDelivr から読み込む（合わせて転送 約 6MB、展開後 約 11MB）。URL はコミットに、中身は SRI のハッシュに固定している。読み込むまでは豆腐で、読み込んだあとは日本語（漢字・かな）もこのフォントで描く。ハングルはこのフォントにないので、読み込んだあともブラウザのフォントで描く。外部の CDN に頼るので、オフラインや読み込みに失敗したときは豆腐のまま（取りに行くのはページを開いている間に 1 回だけ）。読み込むと、ページを開いたことが jsDelivr に伝わる。日本語フォントにもない字（アラビア文字やタイ文字など）が出たときも 1 回読み込む。ソートの目印を ↑↓ にしているのは、▲▼ だと IBM Plex Sans にないため、ソートだけで読み込みが起きるから。`/` `*` `&` の入力欄は IME で日本語を入力できる（ネイティブ版も同じ）。gpui_web は見えない textarea で入力を受けるので、`ctrl-b` などでブラウザがカーソルを動かすことがあり、そのときはカーソルを表示した位置で編集する（矢印キーではカーソルを動かせない）。ドロップしたファイルの読み込み（文字コードの変換とパース）は区切らずに処理するので、大きいファイルでは終わるまで画面が固まり、読み込み中の表示もない。読み込みの失敗と推定した文字コード名はブラウザのコンソールにだけ出る（`eprintln!` はブラウザでは出ない）。一度に開くのは最初の 1 ファイルだけ。Windows / Linux のブラウザでは `ctrl-shift-j`（Chrome の DevTools）や `ctrl-shift-m`（Firefox のレスポンシブデザインモード）がブラウザに取られることがある。クリップボードへの書き込みは https か localhost でないとできない（失敗はステータスバーに出る）
 - **句読点を含む日本語の文の列幅**: 列幅は、ほとんどの行を字と隣り合う 2 字の組の幅から出すが、句読点やかっこ（、。「」（）など）を含む日本語の行は 1 行ずつ丸ごと組んで測る（macOS の CoreText は前後の字によって約物を詰めたり空けたりするので、組だけでは幅が決まらない）。1 行に 10〜40µs かかるので、先頭 100 行の大半が文章の列が多いと開くのが遅くなる（100 行 × 10 列で約 50ms、300 列なら 1 秒ほど）
 - **エンコーディング検出とメモリ**: `load_csv` のファイル読み込みは `std::fs::read` で全量バッファリングしてからエンコーディング検出を行う。UTF-8 と判明した場合はバッファを drop しファイルを再オープンしてストリーミング読み込み（再オープン失敗時はバッファにフォールバック）。非 UTF-8 の場合もトランスコード後にバッファを drop。最終メモリ使用量は `CsvData` が全行保持するため変わらないが、ピーク時の同時バッファ保持を回避。行データはセルごとに `String` を持たず `Table` に詰めるが、セルごとに区切り位置（`usize`: ネイティブ版 8 バイト、wasm32 4 バイト）を持つので、小さいセルが多い CSV ではファイルの数倍になる（100 万行 × 10 列・42.5MB の CSV で読み込み後 約 158MB。変更前は約 522MB。wasm32 は未計測）。`Table` の文字列は伸ばすたびに広い領域へ移るので読み込み中は一時的に増えるが、同じ CSV での最大と読み込み後の差は 10MB 未満だった。xlsx は calamine の `Range`（シート全体）と作っている途中の `Table` が同時にメモリにある
 - **`/` 検索の大文字小文字の比べ方**: `/` はエスケープしたクエリを case-insensitive な正規表現で比べる（セルごとの `to_lowercase` を避けるため）。Unicode の単純な折りたたみなので、`to_lowercase` とは少し結果が違う（İ は `i` にマッチせず、語末の Σ は `σ` にマッチする）

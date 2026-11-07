@@ -1,6 +1,7 @@
 // Cloudflare Workers Static Assets for the browser build. There is no Worker script: the site
-// is the output of `trunk build --release` plus `_headers` from scripts/web-headers.mjs.
-// .github/workflows/deploy-web.yml deploys it.
+// is the output of `trunk build --release` (with the fonts, licenses and `_headers` that
+// scripts/web-assets.sh adds). .github/workflows/deploy-web.yml deploys it. Do not add a `build`
+// command: the deploy job, which has the Cloudflare secrets, would run it.
 {
   "name": "csvr",
   "compatibility_date": "2026-10-20",

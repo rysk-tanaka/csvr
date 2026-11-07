@@ -63,6 +63,9 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: web
+          # The wasm32 target directory is large; caches saved per pull request would push out
+          # the one production deploys use.
+          save-if: ${{ github.event_name != 'pull_request' }}
       - name: Install trunk
         env:
           TRUNK_VERSION: 0.22.1
@@ -75,8 +78,8 @@ jobs:
           mkdir -p "$RUNNER_TEMP/trunk"
           tar -xzf "$archive" -C "$RUNNER_TEMP/trunk"
           echo "$RUNNER_TEMP/trunk" >> "$GITHUB_PATH"
+      # The post_build hook (scripts/web-assets.sh) adds the font, the licenses and `_headers`.
       - run: trunk build --release --locked
-      - run: node scripts/web-headers.mjs web/dist
       # Hidden files (Trunk's .trunk-lock) are left out by default.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -94,8 +97,13 @@ jobs:
       group: deploy-web-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'production' }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     steps:
-      # Only for wrangler.jsonc. Nothing from the repository runs in this job.
+      # Only wrangler.jsonc, so no other file from the repository (a package.json with install
+      # scripts, an .npmrc) is here while the secrets are. wrangler.jsonc must not get a `build`
+      # command: wrangler would run it in this job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: wrangler.jsonc
+          sparse-checkout-cone-mode: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: web-dist

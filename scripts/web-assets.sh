@@ -1,48 +1,84 @@
 #!/bin/sh
 # Trunk post_build hook (see Trunk.toml). Adds the files the browser build serves next to the app
-# but that are not part of the Rust build: the Japanese font and the licenses. Trunk runs it from
-# the repository root, before it moves the staging directory to `web/dist`.
+# but that are not part of the Rust build: the Japanese font, the licenses, and `_headers` for
+# Cloudflare Workers. Trunk runs it from the repository root, after it has written the final
+# index.html to the staging directory and before it moves that directory to `web/dist`.
 set -eu
 
 : "${TRUNK_STAGING_DIR:?run this from Trunk (Trunk.toml hooks)}"
 
 # IBM Plex Sans JP, which src/web.rs loads when no bundled font has a character. The site serves
 # it itself, so opening the page tells no CDN. The URL is pinned to the commit of the
-# `@ibm/plex-sans-jp@3.0.0` tag. The hashes are the ones in `IBM_PLEX_SANS_JP` in src/web.rs; the
-# browser rejects the font if they differ, so change both together.
+# `@ibm/plex-sans-jp@3.0.0` tag.
 FONT_BASE_URL=https://raw.githubusercontent.com/IBM/plex/89cba80dad75561262e758f4b6ddd474c5119796/packages/plex-sans-jp/fonts/complete/ttf/unhinted
-# Kept between builds, so only the first build (and `trunk serve`) needs the network.
+# Kept between builds, so only the first `trunk build` or `trunk serve` needs the network.
 FONT_CACHE_DIR=target/web-fonts
+
+# A release build must not go out without the font. A debug build (`trunk serve`) works without
+# it, as before the font was served from the site: text the bundled font lacks stays tofu.
+if [ "${TRUNK_PROFILE:-}" = release ]; then
+  is_release=true
+else
+  is_release=false
+fi
 
 sri_sha384() {
   printf 'sha384-%s' "$(openssl dgst -sha384 -binary "$1" | openssl base64 -A)"
 }
 
-# Downloads a font into the cache unless the cached copy already has the expected hash.
+# The file names and hashes come from `IBM_PLEX_SANS_JP` in src/web.rs, so the files here are the
+# ones the app asks for and the browser accepts. Each `url: "fonts/<name>"` line there is followed
+# by its `integrity: "sha384-..."` line. Prints "<name> <integrity>" per font.
+font_list() {
+  awk '
+    /url: "fonts\// { match($0, /fonts\/[^"]+/); name = substr($0, RSTART + 6, RLENGTH - 6); next }
+    /integrity: "sha384-/ && name != "" { match($0, /sha384-[^"]+/); print name, substr($0, RSTART, RLENGTH); name = "" }
+  ' src/web.rs
+}
+
+# Downloads a font into the cache unless the cached copy already has the expected hash. Returns 1
+# when the download fails; a wrong hash always stops the build, since then the code is wrong.
 fetch_font() {
   name=$1
   integrity=$2
   cached="$FONT_CACHE_DIR/$name"
   if [ -f "$cached" ] && [ "$(sri_sha384 "$cached")" = "$integrity" ]; then
-    return
+    return 0
   fi
   mkdir -p "$FONT_CACHE_DIR"
   download="$cached.download"
-  curl --fail --silent --show-error --location --retry 3 --output "$download" "$FONT_BASE_URL/$name"
+  if ! curl --fail --silent --show-error --location --retry 3 --output "$download" "$FONT_BASE_URL/$name"; then
+    rm -f "$download"
+    return 1
+  fi
   actual=$(sri_sha384 "$download")
   if [ "$actual" != "$integrity" ]; then
     rm -f "$download"
-    echo "error: $FONT_BASE_URL/$name has $actual, expected $integrity" >&2
+    echo "error: $FONT_BASE_URL/$name has $actual, but src/web.rs expects $integrity" >&2
     exit 1
   fi
   mv "$download" "$cached"
 }
 
-fetch_font IBMPlexSansJP-Regular.ttf sha384-/yQZjwaTcpaqocYFEcsa32pkb1RuXBjNCLOFAOqOLZ75hLANiYYjiKWMYS7ZOX/4
-fetch_font IBMPlexSansJP-SemiBold.ttf sha384-HsmSeI1bT3Exy/NcxEvE9gmfB11qUzPrmClQYUGzdkCvMIb0Hr9ct1l2VEhYzjua
+fonts=$(font_list)
+if [ -z "$fonts" ]; then
+  echo "error: found no fonts in IBM_PLEX_SANS_JP in src/web.rs" >&2
+  exit 1
+fi
 
 mkdir -p "$TRUNK_STAGING_DIR/fonts" "$TRUNK_STAGING_DIR/licenses"
-cp "$FONT_CACHE_DIR/IBMPlexSansJP-Regular.ttf" "$FONT_CACHE_DIR/IBMPlexSansJP-SemiBold.ttf" "$TRUNK_STAGING_DIR/fonts/"
+while read -r name integrity; do
+  if fetch_font "$name" "$integrity"; then
+    cp "$FONT_CACHE_DIR/$name" "$TRUNK_STAGING_DIR/fonts/"
+  elif [ "$is_release" = true ]; then
+    echo "error: could not download $FONT_BASE_URL/$name" >&2
+    exit 1
+  else
+    echo "warning: could not download $name; characters the bundled font lacks stay tofu" >&2
+  fi
+done <<EOF
+$fonts
+EOF
 
 # Two of the sources are named LICENSE, so each gets its own name.
 cp LICENSE "$TRUNK_STAGING_DIR/licenses/csvr-LICENSE.txt"
@@ -54,3 +90,6 @@ cp assets/LICENSE "$TRUNK_STAGING_DIR/licenses/icon-LICENSE.txt"
 
 # Trunk keeps its lock file in the output directory; wrangler would otherwise publish it.
 printf '.trunk-lock\n' > "$TRUNK_STAGING_DIR/.assetsignore"
+
+# Last, because it hashes the inline code of every HTML file, the licenses page included.
+node scripts/web-headers.mjs "$TRUNK_STAGING_DIR"

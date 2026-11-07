@@ -29,7 +29,7 @@ struct FontFile {
     /// Relative to the page. `scripts/web-assets.sh` puts the file there when Trunk builds the
     /// page, so the site serves it itself and opening the page tells no CDN.
     url: &'static str,
-    /// Subresource Integrity hash, the same one `scripts/web-assets.sh` checks after downloading
+    /// Subresource Integrity hash, which `scripts/web-assets.sh` also checks after downloading
     /// the file. The browser rejects the response if the content differs, so a wrong file in the
     /// output cannot reach the app. It also stands in for checking the font: `add_fonts` reports
     /// success even for bytes it cannot parse, and these bytes are the files that were checked
@@ -41,6 +41,10 @@ struct FontFile {
 /// has the symbols the bundled font lacks (full-width letters, ①, ㈱, ▲, ...). The npm package
 /// only ships WOFF and WOFF2, which cosmic-text cannot read, so `scripts/web-assets.sh` takes the
 /// TTFs from GitHub, at the commit of the `@ibm/plex-sans-jp@3.0.0` tag.
+///
+/// `scripts/web-assets.sh` reads the file names and hashes from here, so this is the only place to
+/// change them. It expects each entry as written: a `url: "fonts/..."` line, then its `integrity`
+/// line.
 const IBM_PLEX_SANS_JP: [FontFile; 2] = [
     FontFile {
         url: "fonts/IBMPlexSansJP-Regular.ttf",

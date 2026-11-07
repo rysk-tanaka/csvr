@@ -1,9 +1,10 @@
 // Writes `_headers` for Cloudflare Workers Static Assets into the browser build's output.
 //
-//   node scripts/web-headers.mjs web/dist
+//   node scripts/web-headers.mjs <directory with the built index.html>
 //
-// Run it after `trunk build`. Trunk inlines the script that starts the app, and that script names
-// the hashed wasm and JS files, so its CSP hash changes with every build.
+// scripts/web-assets.sh runs it on Trunk's staging directory after each build. Trunk inlines the
+// script that starts the app, and that script names the hashed wasm and JS files, so its CSP hash
+// changes with every build.
 
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -15,11 +16,14 @@ if (!dist) {
   process.exit(2);
 }
 
-/** All HTML files under `dir`, e.g. index.html and licenses/THIRD_PARTY_LICENSES.html. */
+/** All HTML files under `dir`, e.g. index.html and licenses/THIRD_PARTY_LICENSES.html. Walks
+ * the tree itself: `recursive` with `Dirent.parentPath` needs Node 20.12 or later. */
 function htmlFiles(dir) {
-  return readdirSync(dir, { withFileTypes: true, recursive: true })
-    .filter((entry) => entry.isFile() && entry.name.endsWith(".html"))
-    .map((entry) => join(entry.parentPath, entry.name));
+  return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(dir, entry.name);
+    if (entry.isDirectory()) return htmlFiles(path);
+    return entry.isFile() && entry.name.endsWith(".html") ? [path] : [];
+  });
 }
 
 function cspHash(text) {
@@ -62,7 +66,8 @@ const csp = [
   // gpui_web/src/viewport.rs). Per-value hashes would stop matching silently when a GPUI update
   // changes the values. The page never inserts data as HTML, and attributes cannot run scripts.
   "style-src-attr 'unsafe-inline'",
-  // The Japanese font is fetched from this site (`fonts/`).
+  // The wasm (Trunk's preload and wasm-bindgen's `init` both use fetch) and the Japanese font
+  // (`fonts/`) are fetched from this site.
   "connect-src 'self'",
   "img-src 'self'",
   "base-uri 'none'",
@@ -70,7 +75,9 @@ const csp = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-// Files Trunk names by their content can be kept for good.
+// Files Trunk names by their content can be kept for good. The fonts keep their names, and the
+// app checks them against SRI hashes, so a cached old font would be rejected after an update:
+// `no-cache` makes the browser revalidate them (a 304 when unchanged).
 const immutable = "public, max-age=31536000, immutable";
 const headers = `/*
   Content-Security-Policy: ${csp}
@@ -84,7 +91,7 @@ const headers = `/*
   Cache-Control: ${immutable}
 
 /fonts/*
-  Cache-Control: public, max-age=604800
+  Cache-Control: no-cache
 `;
 
 writeFileSync(join(dist, "_headers"), headers);

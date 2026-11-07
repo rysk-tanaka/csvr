@@ -79,7 +79,7 @@ Rust 2024 edition（`edition = "2024"`）を使用。GPUI のバージョンは 
 
 ## CI
 
-ビルド・テスト・lint（`build.yml`, `test.yml`, `lint.yml`）は macOS ランナー（`macos-latest`）で実行。GPUI が Metal を必要とするため Linux では不可。ただし `lint.yml` の `cargo fmt --check` ジョブは Metal 不要のため `ubuntu-latest` で実行。これらのワークフローでは `--locked` フラグを使用（Cargo.lock を厳密に再現）。`cargo fmt` は `--locked` 非対応のため除く。テストと clippy は `default-members` でコアも対象になるが、CI では明示のため `--workspace` を付ける。`test.yml` の wasm32 ジョブ（ubuntu-latest）は、コアを `wasm32-unknown-unknown`（gpui_web と同じターゲット）で `cargo check` し、テストを `wasm32-wasip1` で wasmtime を使って実行する。ブラウザ版も `cargo check --bin csvr --target wasm32-unknown-unknown` で確かめる（`usize` が 4 バイトになる環境での確認。wasm32-unknown-unknown でテストを動かすには wasm-bindgen-test が要るため）。
+ビルド・テスト・lint（`build.yml`, `test.yml`, `lint.yml`）は macOS ランナー（`macos-latest`）で実行。GPUI が Metal を必要とするため Linux では不可。ただし `lint.yml` の `cargo fmt --check` ジョブは Metal 不要のため `ubuntu-latest` で実行。これらのワークフローでは `--locked` フラグを使用（Cargo.lock を厳密に再現）。`cargo fmt` は `--locked` 非対応のため除く。テストと clippy は `default-members` でコアも対象になるが、CI では明示のため `--workspace` を付ける。`test.yml` の wasm32 ジョブ（ubuntu-latest）は、コアを `wasm32-unknown-unknown`（gpui_web と同じターゲット）で `cargo check` し、テストを `wasm32-wasip1` で wasmtime を使って実行する（`usize` が 4 バイトになる環境での確認。wasm32-unknown-unknown でテストを動かすには wasm-bindgen-test が要るため）。ブラウザ版も `cargo check --bin csvr --target wasm32-unknown-unknown` で確かめる。
 
 その他のワークフロー（`claude.yml`, `claude-code-review.yml`, `issue-scan.yml`, `issue-implement.yml`）は `rysk-tanaka/workflows` の reusable workflow を呼び出す薄いラッパーで、ubuntu-latest で動作する。`auto-release.yml` は reusable workflow でリリース作成後、macOS ランナーで `aarch64-apple-darwin` / `x86_64-apple-darwin` のバイナリをビルドしリリースにアップロードする。
 

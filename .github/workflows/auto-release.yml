@@ -51,6 +51,10 @@ jobs:
   upload-binary:
     needs: create-release
     if: needs.create-release.outputs.released == 'true'
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     strategy:
@@ -76,6 +80,12 @@ jobs:
         run: |
           tar czf csvr-${{ needs.create-release.outputs.tag }}-${{ matrix.target }}.tar.gz \
             -C target/${{ matrix.target }}/release csvr
+      # Lets anyone check that a downloaded archive was built by this workflow:
+      # gh attestation verify <file> --owner rysk-tanaka
+      - name: Attest the build provenance
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: csvr-${{ needs.create-release.outputs.tag }}-${{ matrix.target }}.tar.gz
       - name: Upload to release
         env:
           GH_TOKEN: ${{ github.token }}

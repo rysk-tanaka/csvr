@@ -54,6 +54,11 @@ csvr はターミナルから CSV ファイルを指定して GUI ウィンド�
 ### インストール
 
 [GitHub Releases](https://github.com/rysk-tanaka/csvr/releases) からビルド済みバイナリをダウンロードできます。
+バイナリにはビルドの来歴（attestation）を付けているので、このリポジトリのワークフローでビルドされたものかを次のコマンドで確かめられます。
+
+```bash
+gh attestation verify csvr-<バージョン>-<ターゲット>.tar.gz --owner rysk-tanaka
+```
 
 [mise](https://mise.jdx.dev/) を使う場合:
 

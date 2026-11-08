@@ -1,0 +1,24 @@
+# Checked by `cargo deny check advisories sources` in CI (.github/workflows/deny.yml).
+# Licenses are handled by cargo-about (about.toml), so they are not checked here.
+
+[advisories]
+# RustSec advisories. Vulnerabilities always fail; yanked versions fail too, since a yank
+# is how a compromised release is withdrawn.
+yanked = "deny"
+# Every unmaintained crate today (paste, ttf-parser, rustybuzz, zvariant, ...) comes in through
+# gpui, and csvr cannot replace it. Only direct dependencies fail; the rest show up when zed moves.
+unmaintained = "workspace"
+ignore = []
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# gpui comes from the zed repository, which pulls the rest of these through its own git
+# dependencies. A zed upgrade that adds a new git source fails here until it is reviewed.
+allow-git = [
+    "https://github.com/zed-industries/zed.git",
+    "https://github.com/zed-industries/font-kit",
+    "https://github.com/zed-industries/oo7",
+    "https://github.com/gfx-rs/wgpu",
+]

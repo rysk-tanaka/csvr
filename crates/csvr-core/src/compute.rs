@@ -1050,6 +1050,11 @@ mod tests {
     }
 
     #[test]
+    fn clamp_h_offset_is_zero_when_content_matches_viewport() {
+        assert_eq!(clamp_h_offset(-100.0, 800.0, 800.0), 0.0);
+    }
+
+    #[test]
     fn clamp_h_offset_stops_at_left_edge() {
         assert_eq!(clamp_h_offset(10.0, 1000.0, 800.0), 0.0);
     }

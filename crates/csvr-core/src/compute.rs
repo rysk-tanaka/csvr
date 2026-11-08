@@ -1092,6 +1092,11 @@ mod tests {
     }
 
     #[test]
+    fn h_offset_to_reveal_aligns_column_as_wide_as_visible_area() {
+        assert_eq!(h_offset_to_reveal(-50.0, 100.0, 300.0, 300.0), -100.0);
+    }
+
+    #[test]
     fn h_offset_to_reveal_keeps_offset_without_visible_area() {
         assert_eq!(h_offset_to_reveal(-50.0, 100.0, 50.0, 0.0), -50.0);
     }

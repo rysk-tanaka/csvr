@@ -16,9 +16,12 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
-    uses: rysk-tanaka/workflows/.github/workflows/issue-implement.yml@04fdc017c9cfcbd3c9461f93e57cd101bd2fdedf # main
+    uses: rysk-tanaka/workflows/.github/workflows/issue-implement.yml@604275681ce0aa277555a4670e8a7888399a119f # main
     with:
       package_manager: none
+      # Strip Claude's credentials from cargo and other subprocesses, so build.rs cannot read them.
+      # On trial in csvr before other callers turn it on.
+      subprocess_env_scrub: true
       claude_args: '--max-turns 40 --model claude-opus-4-6 --allowed-tools "Read,Edit,Write,Glob,Grep,Bash(git fetch origin *),Bash(git add *),Bash(git commit *),Bash(git checkout *),Bash(git push origin implement-issue-*),Bash(git status),Bash(git status *),Bash(git diff),Bash(git diff *),Bash(git log *),Bash(gh issue view ${{ github.event.issue.number }}),Bash(gh pr create * --body-file *),Bash(gh pr edit * --add-label *),Bash(cargo build),Bash(cargo build *),Bash(cargo test),Bash(cargo test *),Bash(cargo clippy),Bash(cargo clippy *),Bash(cargo fmt),Bash(cargo fmt *)"'
       prompt: |
         Issue #${{ github.event.issue.number }} を実装し、PR を作成してください。

@@ -2,7 +2,6 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["github>rysk-tanaka/workflows#41caae6bf816cb53a25c1a03637b73992f6b38b1", ":enablePreCommit"],
   "enabledManagers": ["cargo", "github-actions", "pre-commit", "custom.regex"],
-  "lockFileMaintenance": { "enabled": true },
   "packageRules": [
     {
       "description": "The shared preset automerges every minor/patch update; GitHub Actions updates stay manual here",

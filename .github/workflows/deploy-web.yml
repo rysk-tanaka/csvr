@@ -129,7 +129,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: '4.153.0'
+          wranglerVersion: '4.160.0'
           command: deploy
       # A deployment on the pull request's head commit, so the pull request shows it. Previews of
       # all pull requests share the `preview` environment.
@@ -158,7 +158,7 @@ jobs:
         with:
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
-          wranglerVersion: '4.153.0'
+          wranglerVersion: '4.160.0'
           command: versions upload --preview-alias pr-${{ github.event.pull_request.number }}
       - name: Finish preview deployment
         if: always() && steps.deployment.outputs.id

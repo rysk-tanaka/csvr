@@ -16,7 +16,7 @@ jobs:
       pull-requests: write
       issues: write
       id-token: write
-    uses: rysk-tanaka/workflows/.github/workflows/issue-implement.yml@604275681ce0aa277555a4670e8a7888399a119f # main
+    uses: rysk-tanaka/workflows/.github/workflows/issue-implement.yml@d5a542fb1ec5e23efa47ccf1a4f8dbbe8a92d71a # main
     with:
       package_manager: none
       # Strip Claude's credentials from subprocesses, so build and install scripts cannot read them.
